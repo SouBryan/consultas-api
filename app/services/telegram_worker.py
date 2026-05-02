@@ -1,6 +1,7 @@
 import asyncio
 import unicodedata
 from collections.abc import Callable
+from dataclasses import dataclass, field
 
 from telethon import TelegramClient, events
 from telethon.tl.custom.message import Message
@@ -10,6 +11,102 @@ from app.config import settings
 
 RESULT_URL_FRAGMENT = "result-consultation"
 TIMEOUT_SECONDS = 15
+
+
+@dataclass(frozen=True)
+class CommandDefinition:
+    template: str
+    button_map: dict[str, str] = field(default_factory=dict)
+    has_sub_base: bool = False
+
+
+COMMAND_MAP: dict[str, CommandDefinition] = {
+    "cpf": CommandDefinition(
+        template="/cpf {input}",
+        button_map={
+            "completo": "CPF | COMPLETO",
+            "fotos": "FOTOS",
+            "vizinhos": "VIZINHOS",
+            "empregos": "EMPREGOS",
+            "vacinas": "VACINAS",
+            "beneficios": "BENEFÍCIOS",
+            "internet": "INTERNET",
+            "obito": "ÓBITO",
+            "compras": "COMPRAS",
+        },
+        has_sub_base=True,
+    ),
+    "nome": CommandDefinition(
+        template="/nome {input}",
+        button_map={
+            "nome": "NOME",
+            "nome_mae": "NOME DA MÃE",
+        },
+        has_sub_base=True,
+    ),
+    "telefone": CommandDefinition(
+        template="/telefone {input}",
+        button_map={
+            "telefone": "TELEFONE",
+        },
+        has_sub_base=True,
+    ),
+    "email": CommandDefinition(
+        template="/email {input}",
+        button_map={
+            "email": "EMAIL",
+        },
+        has_sub_base=True,
+    ),
+    "titulo": CommandDefinition(
+        template="/titulo {input}",
+        button_map={
+            "titulo": "TÍTULO DE ELEITOR",
+        },
+        has_sub_base=True,
+    ),
+    "pix": CommandDefinition(
+        template="/pix {input}",
+        button_map={
+            "pix": "PIX",
+            "pix2": "PIX2",
+        },
+        has_sub_base=True,
+    ),
+    "cep": CommandDefinition(template="/cep {input}"),
+    "ip": CommandDefinition(template="/ip {input}"),
+}
+
+
+def build_command(command_type: str, query_input: str) -> str:
+    try:
+        definition = COMMAND_MAP[command_type]
+    except KeyError as exc:
+        raise ValueError(f"Tipo de consulta '{command_type}' não suportado.") from exc
+
+    return definition.template.format(input=query_input)
+
+
+def resolve_base_button_text(command_type: str, base: str | None) -> str | None:
+    try:
+        definition = COMMAND_MAP[command_type]
+    except KeyError as exc:
+        raise ValueError(f"Tipo de consulta '{command_type}' não suportado.") from exc
+
+    if not definition.has_sub_base:
+        if base is not None:
+            raise ValueError(f"Tipo de consulta '{command_type}' não aceita base.")
+        return None
+
+    if base is None:
+        raise ValueError(f"Tipo de consulta '{command_type}' exige base.")
+
+    try:
+        return definition.button_map[base]
+    except KeyError as exc:
+        raise ValueError(
+            f"Base '{base}' inválida para o tipo de consulta '{command_type}'."
+        ) from exc
 
 
 async def execute_query(
@@ -30,22 +127,25 @@ async def execute_query(
 
     _raise_if_bot_error(bot_reply)
 
+    existing_url = _extract_result_url(bot_reply)
+    if existing_url is not None:
+        return existing_url
+
     if base_button_text is not None:
         _ensure_button_exists(bot_reply, base_button_text)
 
-        edit_future, close_edit_waiter = _create_edit_waiter(client, bot_reply.id)
+        follow_up_future, close_follow_up_waiter = _create_post_click_waiter(client, bot_reply.id)
         try:
             await bot_reply.click(text=base_button_text)
-            updated_message = await asyncio.wait_for(edit_future, timeout=TIMEOUT_SECONDS)
+            updated_message = await asyncio.wait_for(
+                follow_up_future,
+                timeout=TIMEOUT_SECONDS,
+            )
         except asyncio.TimeoutError as exc:
             raise TimeoutError("Bot não editou a mensagem dentro de 15 segundos.") from exc
         finally:
-            close_edit_waiter()
+            close_follow_up_waiter()
     else:
-        existing_url = _extract_result_url(bot_reply)
-        if existing_url is not None:
-            return existing_url
-
         edit_future, close_edit_waiter = _create_edit_waiter(client, bot_reply.id)
         try:
             updated_message = await asyncio.wait_for(edit_future, timeout=TIMEOUT_SECONDS)
@@ -115,6 +215,43 @@ def _create_edit_waiter(
 
     def close() -> None:
         client.remove_event_handler(handler, event_builder)
+
+    return future, close
+
+
+def _create_post_click_waiter(
+    client: TelegramClient,
+    message_id: int,
+) -> tuple[asyncio.Future[Message], Callable[[], None]]:
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[Message] = loop.create_future()
+    new_message_builder = events.NewMessage(chats=settings.telegram_group_id)
+    edited_message_builder = events.MessageEdited(chats=settings.telegram_group_id)
+
+    async def on_new_message(event: events.NewMessage.Event) -> None:
+        message = event.message
+        if _extract_reply_to_msg_id(message) != message_id:
+            return
+
+        if _extract_result_url(message) is not None or _message_has_error(message):
+            if not future.done():
+                future.set_result(message)
+
+    async def on_edited_message(event: events.MessageEdited.Event) -> None:
+        message = event.message
+        if message.id != message_id:
+            return
+
+        if _extract_result_url(message) is not None or _message_has_error(message):
+            if not future.done():
+                future.set_result(message)
+
+    client.add_event_handler(on_new_message, new_message_builder)
+    client.add_event_handler(on_edited_message, edited_message_builder)
+
+    def close() -> None:
+        client.remove_event_handler(on_new_message, new_message_builder)
+        client.remove_event_handler(on_edited_message, edited_message_builder)
 
     return future, close
 

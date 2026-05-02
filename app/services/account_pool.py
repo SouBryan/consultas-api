@@ -47,3 +47,7 @@ class AccountPool:
 
         account_lock.release()
         self._available_accounts.release()
+
+    @property
+    def size(self) -> int:
+        return len(self._labels)

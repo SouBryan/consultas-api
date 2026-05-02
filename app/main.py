@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import time
 
 from fastapi import FastAPI, Request
 from telethon import TelegramClient
@@ -19,6 +20,7 @@ def get_pool(request: Request) -> AccountPool:
 async def lifespan(app: FastAPI):
     clients = await _connect_clients()
     app.state.pool = AccountPool(clients)
+    app.state.started_at = time.monotonic()
 
     try:
         yield
@@ -57,6 +59,18 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+
+@app.get("/api/health", tags=["system"])
+async def health_check(request: Request) -> dict[str, float | int | str]:
+    pool = get_pool(request)
+    started_at = getattr(request.app.state, "started_at", time.monotonic())
+    uptime = max(0.0, time.monotonic() - started_at)
+    return {
+        "status": "ok",
+        "accounts": pool.size,
+        "uptime": round(uptime, 3),
+    }
 
 
 from app.routes.consultas import router as consultas_router
