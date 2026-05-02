@@ -18,7 +18,7 @@ def configure_logging() -> None:
 
     handler = logging.StreamHandler(sys.stdout)
     formatter = JsonFormatter(
-        ["asctime", "levelname", "name", "message"],
+        fmt="%(asctime)s %(levelname)s %(name)s %(message)s",
         rename_fields={"asctime": "timestamp", "levelname": "level"},
         static_fields={"service": "consultas-api"},
     )
