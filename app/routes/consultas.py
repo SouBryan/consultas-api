@@ -1,9 +1,11 @@
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
-from app.main import get_pool
+from app.main import get_cache, get_pool
 from app.models.requests import (
     ConsultationType,
     ConsultaCEPRequest,
@@ -17,38 +19,173 @@ from app.models.requests import (
     ConsultaTituloRequest,
 )
 from app.services.account_pool import AccountPool
+from app.services.cache import ResultCache
 from app.services.scraper import scrape_result
-from app.services.telegram_worker import build_command, execute_query, resolve_base_button_text
+from app.services.telegram_worker import (
+    BotResponseError,
+    build_command,
+    execute_query,
+    resolve_base_button_text,
+)
+from app.utils.logger import get_logger
 
 
 router = APIRouter(prefix="/api/consulta", tags=["consultas"])
+logger = get_logger("routes.consultas")
 
 
 async def _execute_consulta(
     pool: AccountPool,
+    cache: ResultCache,
     tipo: ConsultationType,
     query_input: str,
     base: str | None = None,
-) -> dict[str, Any]:
-    label, client = await pool.acquire()
+) -> JSONResponse:
+    command = build_command(tipo, query_input)
+    base_button_text = resolve_base_button_text(tipo, base)
+    cached_payload = cache.get(command, base)
 
-    try:
-        command = build_command(tipo, query_input)
-        base_button_text = resolve_base_button_text(tipo, base)
-        result_url = await execute_query(client, command, base_button_text)
-        data = await scrape_result(result_url)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except TimeoutError as exc:
-        raise HTTPException(status_code=504, detail=str(exc)) from exc
-    finally:
-        pool.release(label)
+    if cached_payload is not None:
+        logger.info(
+            "Consulta servida do cache.",
+            extra={
+                "event": "consulta_cache_hit",
+                "tipo": tipo,
+                "input": query_input,
+                "base": base,
+            },
+        )
+        return JSONResponse(content=cached_payload, headers={"X-Cache": "HIT"})
 
-    return {
-        "status": "success",
-        "link": result_url,
-        "data": data,
-    }
+    started_at = time.monotonic()
+    tried_labels: set[str] = set()
+    timeout_failures: list[dict[str, Any]] = []
+    max_attempts = min(2, pool.size)
+
+    for attempt in range(1, max_attempts + 1):
+        label, client = await pool.acquire(exclude_labels=tried_labels)
+        attempt_started_at = time.monotonic()
+
+        try:
+            result_url = await execute_query(client, command, base_button_text)
+            data = await scrape_result(result_url)
+            payload = {
+                "status": "success",
+                "link": result_url,
+                "data": data,
+            }
+            cache.set(command, base, payload)
+
+            logger.info(
+                "Consulta concluída com sucesso.",
+                extra={
+                    "event": "consulta_success",
+                    "tipo": tipo,
+                    "input": query_input,
+                    "base": base,
+                    "account": label,
+                    "attempt": attempt,
+                    "retry_used": attempt > 1,
+                    "timeout_failures": timeout_failures,
+                    "duration_ms": round((time.monotonic() - started_at) * 1000, 2),
+                    "cache": "MISS",
+                },
+            )
+            return JSONResponse(content=payload, headers={"X-Cache": "MISS"})
+        except TimeoutError as exc:
+            tried_labels.add(label)
+            timeout_failures.append(
+                {
+                    "account": label,
+                    "message": str(exc),
+                    "duration_ms": round((time.monotonic() - attempt_started_at) * 1000, 2),
+                }
+            )
+            logger.warning(
+                "Timeout ao consultar bot.",
+                extra={
+                    "event": "consulta_timeout",
+                    "tipo": tipo,
+                    "input": query_input,
+                    "base": base,
+                    "account": label,
+                    "attempt": attempt,
+                    "duration_ms": round((time.monotonic() - attempt_started_at) * 1000, 2),
+                },
+            )
+        except BotResponseError as exc:
+            logger.warning(
+                "Bot retornou erro de negócio.",
+                extra={
+                    "event": "bot_error",
+                    "tipo": tipo,
+                    "input": query_input,
+                    "base": base,
+                    "account": label,
+                    "error_code": exc.error_code,
+                    "status_code": exc.status_code,
+                    "duration_ms": round((time.monotonic() - attempt_started_at) * 1000, 2),
+                },
+            )
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=str(exc),
+                headers={"X-Cache": "MISS"},
+            ) from exc
+        except ValueError as exc:
+            logger.warning(
+                "Erro de validação durante a consulta.",
+                extra={
+                    "event": "consulta_validation_error",
+                    "tipo": tipo,
+                    "input": query_input,
+                    "base": base,
+                    "account": label,
+                    "duration_ms": round((time.monotonic() - attempt_started_at) * 1000, 2),
+                },
+            )
+            raise HTTPException(
+                status_code=422,
+                detail=str(exc),
+                headers={"X-Cache": "MISS"},
+            ) from exc
+        except Exception as exc:
+            logger.error(
+                "Falha inesperada ao processar consulta.",
+                extra={
+                    "event": "consulta_system_error",
+                    "tipo": tipo,
+                    "input": query_input,
+                    "base": base,
+                    "account": label,
+                    "duration_ms": round((time.monotonic() - attempt_started_at) * 1000, 2),
+                },
+                exc_info=exc,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="Erro interno ao processar consulta.",
+                headers={"X-Cache": "MISS"},
+            ) from exc
+        finally:
+            pool.release(label)
+
+    logger.error(
+        "Consulta falhou após esgotar retry por timeout.",
+        extra={
+            "event": "consulta_retry_exhausted",
+            "tipo": tipo,
+            "input": query_input,
+            "base": base,
+            "timeouts": timeout_failures,
+            "duration_ms": round((time.monotonic() - started_at) * 1000, 2),
+        },
+    )
+    raise HTTPException(
+        status_code=504,
+        detail="Bot não respondeu em nenhuma das contas disponíveis.",
+        headers={"X-Cache": "MISS"},
+    )
 
 
 def _build_generic_execution_args(
@@ -121,70 +258,79 @@ def _build_generic_execution_args(
 async def consulta_cpf(
     payload: ConsultaCPFRequest,
     pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
 ):
-    return await _execute_consulta(pool, "cpf", payload.query_input, payload.base)
+    return await _execute_consulta(cache=cache, pool=pool, tipo="cpf", query_input=payload.query_input, base=payload.base)
 
 
 @router.post("/nome")
 async def consulta_nome(
     payload: ConsultaNomeRequest,
     pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
 ):
-    return await _execute_consulta(pool, "nome", payload.query_input, payload.base)
+    return await _execute_consulta(cache=cache, pool=pool, tipo="nome", query_input=payload.query_input, base=payload.base)
 
 
 @router.post("/telefone")
 async def consulta_telefone(
     payload: ConsultaTelefoneRequest,
     pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
 ):
-    return await _execute_consulta(pool, "telefone", payload.query_input, payload.base)
+    return await _execute_consulta(cache=cache, pool=pool, tipo="telefone", query_input=payload.query_input, base=payload.base)
 
 
 @router.post("/cep")
 async def consulta_cep(
     payload: ConsultaCEPRequest,
     pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
 ):
-    return await _execute_consulta(pool, "cep", payload.query_input)
+    return await _execute_consulta(cache=cache, pool=pool, tipo="cep", query_input=payload.query_input)
 
 
 @router.post("/email")
 async def consulta_email(
     payload: ConsultaEmailRequest,
     pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
 ):
-    return await _execute_consulta(pool, "email", payload.query_input, payload.base)
+    return await _execute_consulta(cache=cache, pool=pool, tipo="email", query_input=payload.query_input, base=payload.base)
 
 
 @router.post("/ip")
 async def consulta_ip(
     payload: ConsultaIPRequest,
     pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
 ):
-    return await _execute_consulta(pool, "ip", payload.query_input)
+    return await _execute_consulta(cache=cache, pool=pool, tipo="ip", query_input=payload.query_input)
 
 
 @router.post("/titulo")
 async def consulta_titulo(
     payload: ConsultaTituloRequest,
     pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
 ):
-    return await _execute_consulta(pool, "titulo", payload.query_input, "titulo")
+    return await _execute_consulta(cache=cache, pool=pool, tipo="titulo", query_input=payload.query_input, base="titulo")
 
 
 @router.post("/pix")
 async def consulta_pix(
     payload: ConsultaPIXRequest,
     pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
 ):
-    return await _execute_consulta(pool, "pix", payload.query_input, "pix")
+    return await _execute_consulta(cache=cache, pool=pool, tipo="pix", query_input=payload.query_input, base="pix")
 
 
 @router.post("")
 async def consulta_generica(
     payload: ConsultaGenericaRequest,
     pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
 ):
     tipo, query_input, base = _build_generic_execution_args(payload)
-    return await _execute_consulta(pool, tipo, query_input, base)
+    return await _execute_consulta(cache=cache, pool=pool, tipo=tipo, query_input=query_input, base=base)

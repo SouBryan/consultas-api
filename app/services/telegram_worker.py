@@ -2,6 +2,7 @@ import asyncio
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from http import HTTPStatus
 
 from telethon import TelegramClient, events
 from telethon.tl.custom.message import Message
@@ -10,7 +11,24 @@ from app.config import settings
 
 
 RESULT_URL_FRAGMENT = "result-consultation"
-TIMEOUT_SECONDS = 15
+TIMEOUT_SECONDS = settings.telegram_timeout
+
+
+class BotResponseError(ValueError):
+    STATUS_MAP = {
+        "subscription": HTTPStatus.FORBIDDEN,
+        "not_found": HTTPStatus.NOT_FOUND,
+        "maintenance": HTTPStatus.SERVICE_UNAVAILABLE,
+        "invalid": HTTPStatus.UNPROCESSABLE_ENTITY,
+    }
+
+    def __init__(self, error_code: str, message: str):
+        super().__init__(message)
+        self.error_code = error_code
+
+    @property
+    def status_code(self) -> int:
+        return int(self.STATUS_MAP[self.error_code])
 
 
 @dataclass(frozen=True)
@@ -121,7 +139,7 @@ async def execute_query(
         arm_reply_waiter(sent_message.id)
         bot_reply = await asyncio.wait_for(reply_future, timeout=TIMEOUT_SECONDS)
     except asyncio.TimeoutError as exc:
-        raise TimeoutError("Bot não respondeu dentro de 15 segundos.") from exc
+        raise TimeoutError(f"Bot não respondeu dentro de {TIMEOUT_SECONDS} segundos.") from exc
     finally:
         close_reply_waiter()
 
@@ -142,7 +160,9 @@ async def execute_query(
                 timeout=TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError as exc:
-            raise TimeoutError("Bot não editou a mensagem dentro de 15 segundos.") from exc
+            raise TimeoutError(
+                f"Bot não retornou o resultado dentro de {TIMEOUT_SECONDS} segundos."
+            ) from exc
         finally:
             close_follow_up_waiter()
     else:
@@ -150,7 +170,9 @@ async def execute_query(
         try:
             updated_message = await asyncio.wait_for(edit_future, timeout=TIMEOUT_SECONDS)
         except asyncio.TimeoutError as exc:
-            raise TimeoutError("Bot não retornou o resultado dentro de 15 segundos.") from exc
+            raise TimeoutError(
+                f"Bot não retornou o resultado dentro de {TIMEOUT_SECONDS} segundos."
+            ) from exc
         finally:
             close_edit_waiter()
 
@@ -288,13 +310,13 @@ def _raise_if_bot_error(message: Message) -> None:
     normalized = _normalize_text(text)
 
     if "assinatura ativa" in normalized:
-        raise ValueError("A base selecionada exige assinatura ativa.")
+        raise BotResponseError("subscription", "Base requer assinatura")
     if "manutencao" in normalized:
-        raise ValueError("O módulo consultado está em manutenção.")
+        raise BotResponseError("maintenance", "Em manutenção")
     if "invalido" in normalized:
-        raise ValueError(text or "O bot retornou input inválido.")
+        raise BotResponseError("invalid", text or "O bot retornou input inválido.")
     if "nao encontrado" in normalized:
-        raise ValueError(text or "Resultado não encontrado.")
+        raise BotResponseError("not_found", "Não encontrado")
 
 
 def _message_has_error(message: Message) -> bool:
