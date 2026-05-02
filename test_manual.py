@@ -1,0 +1,24 @@
+import asyncio
+import json
+
+import httpx
+
+
+async def main() -> None:
+    payload = {
+        "cpf": "12974572936",
+        "base": "completo",
+    }
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            "http://localhost:8000/api/consulta/cpf",
+            json=payload,
+        )
+
+    print(f"status_code={response.status_code}")
+    print(json.dumps(response.json(), ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
