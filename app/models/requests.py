@@ -2,7 +2,7 @@ import re
 from ipaddress import IPv4Address
 from typing import Literal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 ConsultationType = Literal[
@@ -66,8 +66,17 @@ def _validate_full_name(value: str, *, allow_single_word: bool = False) -> str:
 
 
 class ConsultaCPFRequest(BaseModel):
-    cpf: str
-    base: CPFBase = "completo"
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "cpf": "12974572936",
+                "base": "completo",
+            }
+        }
+    )
+
+    cpf: str = Field(description="CPF com 11 dígitos, com ou sem pontuação.")
+    base: CPFBase = Field(default="completo", description="Sub-base gratuita da consulta CPF.")
 
     @field_validator("cpf")
     @classmethod
@@ -83,8 +92,17 @@ class ConsultaCPFRequest(BaseModel):
 
 
 class ConsultaNomeRequest(BaseModel):
-    nome: str
-    base: NomeBase = "nome"
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "nome": "João da Silva Santos",
+                "base": "nome",
+            }
+        }
+    )
+
+    nome: str = Field(description="Nome completo da pessoa consultada.")
+    base: NomeBase = Field(default="nome", description="Sub-base da consulta por nome.")
 
     @field_validator("nome")
     @classmethod
@@ -97,8 +115,17 @@ class ConsultaNomeRequest(BaseModel):
 
 
 class ConsultaTelefoneRequest(BaseModel):
-    telefone: str
-    base: TelefoneBase = "telefone"
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "telefone": "44988030666",
+                "base": "telefone",
+            }
+        }
+    )
+
+    telefone: str = Field(description="Telefone com DDD e 10 ou 11 dígitos.")
+    base: TelefoneBase = Field(default="telefone", description="Base disponível para consulta de telefone.")
 
     @field_validator("telefone")
     @classmethod
@@ -114,7 +141,9 @@ class ConsultaTelefoneRequest(BaseModel):
 
 
 class ConsultaCEPRequest(BaseModel):
-    cep: str
+    model_config = ConfigDict(json_schema_extra={"example": {"cep": "87020025"}})
+
+    cep: str = Field(description="CEP com 8 dígitos.")
 
     @field_validator("cep")
     @classmethod
@@ -130,8 +159,17 @@ class ConsultaCEPRequest(BaseModel):
 
 
 class ConsultaEmailRequest(BaseModel):
-    email: str
-    base: EmailBase = "email"
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "email": "joao@gmail.com",
+                "base": "email",
+            }
+        }
+    )
+
+    email: str = Field(description="Endereço de e-mail válido.")
+    base: EmailBase = Field(default="email", description="Base disponível para consulta de e-mail.")
 
     @field_validator("email")
     @classmethod
@@ -147,7 +185,9 @@ class ConsultaEmailRequest(BaseModel):
 
 
 class ConsultaIPRequest(BaseModel):
-    ip: str
+    model_config = ConfigDict(json_schema_extra={"example": {"ip": "8.8.8.8"}})
+
+    ip: str = Field(description="Endereço IPv4 válido.")
 
     @field_validator("ip")
     @classmethod
@@ -164,7 +204,9 @@ class ConsultaIPRequest(BaseModel):
 
 
 class ConsultaTituloRequest(BaseModel):
-    titulo: str
+    model_config = ConfigDict(json_schema_extra={"example": {"titulo": "018921371805"}})
+
+    titulo: str = Field(description="Título de eleitor com 12 dígitos.")
 
     @field_validator("titulo")
     @classmethod
@@ -180,8 +222,17 @@ class ConsultaTituloRequest(BaseModel):
 
 
 class ConsultaPIXRequest(BaseModel):
-    nome: str
-    meio_cpf: str
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "nome": "douglas da costa silva",
+                "meio_cpf": "226471",
+            }
+        }
+    )
+
+    nome: str = Field(description="Nome completo para consulta PIX.")
+    meio_cpf: str = Field(description="Seis dígitos centrais do CPF.")
 
     @field_validator("nome")
     @classmethod
@@ -202,9 +253,19 @@ class ConsultaPIXRequest(BaseModel):
 
 
 class ConsultaGenericaRequest(BaseModel):
-    tipo: ConsultationType
-    input: str
-    base: str | None = None
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "tipo": "cpf",
+                "input": "12974572936",
+                "base": "completo",
+            }
+        }
+    )
+
+    tipo: ConsultationType = Field(description="Tipo de consulta desejado.")
+    input: str = Field(description="Input bruto compatível com o tipo informado.")
+    base: str | None = Field(default=None, description="Base opcional, exigida por alguns tipos.")
 
     @field_validator("input")
     @classmethod
