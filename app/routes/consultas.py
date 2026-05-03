@@ -12,7 +12,9 @@ from app.models.requests import (
     ConsultaChaveRequest,
     ConsultaCNPJRequest,
     ConsultaCNSRequest,
+    ConsultaCondutorRequest,
     ConsultaCPFRequest,
+    ConsultaDDDRequest,
     ConsultaEmailRequest,
     ConsultaEnderecoRequest,
     ConsultaFotoRequest,
@@ -452,6 +454,12 @@ def _build_generic_execution_args(
             specific = ConsultaPEPRequest.model_validate({"cpf": payload.input})
             return payload.tipo, specific.query_input, None
 
+        if payload.tipo == "condutor":
+            if payload.base is not None:
+                raise ValueError("Tipo de consulta 'condutor' não aceita base.")
+            specific = ConsultaCondutorRequest.model_validate({"cpf": payload.input})
+            return payload.tipo, specific.query_input, None
+
         if payload.tipo == "frota":
             if payload.base is not None:
                 raise ValueError("Tipo de consulta 'frota' não aceita base.")
@@ -462,6 +470,12 @@ def _build_generic_execution_args(
             if payload.base is not None:
                 raise ValueError("Tipo de consulta 'processo_numero' não aceita base.")
             specific = ConsultaProcessoNumeroRequest.model_validate({"numero": payload.input})
+            return payload.tipo, specific.query_input, None
+
+        if payload.tipo == "ddd":
+            if payload.base is not None:
+                raise ValueError("Tipo de consulta 'ddd' não aceita base.")
+            specific = ConsultaDDDRequest.model_validate({"ddd": payload.input})
             return payload.tipo, specific.query_input, None
 
         if payload.tipo == "ip":
@@ -995,6 +1009,32 @@ async def consulta_pep(
 
 
 @router.post(
+    "/condutor",
+    response_model=ConsultaResponse,
+    summary="Consultar condutor",
+    description="Consulta condutor usando o Work Bot nesta fase.",
+    responses=COMMON_ERROR_RESPONSES,
+)
+async def consulta_condutor(
+    response: Response,
+    payload: ConsultaCondutorRequest,
+    pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
+    runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
+):
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo="condutor",
+        query_input=payload.query_input,
+    )
+
+
+@router.post(
     "/frota",
     response_model=ConsultaResponse,
     summary="Consultar frota",
@@ -1042,6 +1082,32 @@ async def consulta_processo(
         runtime_state=runtime_state,
         bot_router=bot_router,
         tipo="processo_numero",
+        query_input=payload.query_input,
+    )
+
+
+@router.post(
+    "/ddd",
+    response_model=ConsultaResponse,
+    summary="Consultar DDD",
+    description="Consulta DDD usando o VoidSearch como adapter exclusivo desta fase.",
+    responses=COMMON_ERROR_RESPONSES,
+)
+async def consulta_ddd(
+    response: Response,
+    payload: ConsultaDDDRequest,
+    pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
+    runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
+):
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo="ddd",
         query_input=payload.query_input,
     )
 

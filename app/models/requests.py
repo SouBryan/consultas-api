@@ -25,8 +25,10 @@ ConsultationType = Literal[
     "vizinhos",
     "parentes",
     "pep",
+    "condutor",
     "frota",
     "processo_numero",
+    "ddd",
     "ip",
     "titulo",
     "pix",
@@ -463,6 +465,24 @@ class ConsultaPEPRequest(BaseModel):
         return self.cpf
 
 
+class ConsultaCondutorRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": {"cpf": "07068093868"}})
+
+    cpf: str = Field(description="CPF com 11 dígitos usado na consulta de condutor.")
+
+    @field_validator("cpf")
+    @classmethod
+    def validate_cpf(cls, value: str) -> str:
+        digits_only = _normalize_digits(value)
+        if len(digits_only) != 11:
+            raise ValueError("CPF deve conter 11 dígitos.")
+        return digits_only
+
+    @property
+    def query_input(self) -> str:
+        return self.cpf
+
+
 class ConsultaFrotaRequest(BaseModel):
     model_config = ConfigDict(json_schema_extra={"example": {"cnpj": "33000167000101"}})
 
@@ -494,6 +514,24 @@ class ConsultaProcessoNumeroRequest(BaseModel):
     @property
     def query_input(self) -> str:
         return self.numero
+
+
+class ConsultaDDDRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": {"ddd": "19"}})
+
+    ddd: str = Field(description="DDD brasileiro com 2 dígitos.")
+
+    @field_validator("ddd")
+    @classmethod
+    def validate_ddd(cls, value: str) -> str:
+        digits_only = _normalize_digits(value)
+        if len(digits_only) != 2:
+            raise ValueError("DDD deve conter 2 dígitos.")
+        return digits_only
+
+    @property
+    def query_input(self) -> str:
+        return self.ddd
 
 
 class ConsultaIPRequest(BaseModel):

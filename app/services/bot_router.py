@@ -1,3 +1,4 @@
+from threading import Lock
 from typing import Any
 
 from telethon import TelegramClient
@@ -8,6 +9,10 @@ from app.services.adapters import (
     BotAdapter,
     BotResponseError,
     DataFlowAdapter,
+    PaidOnlyError,
+    UnknowrealbotAdapter,
+    UnixRobotAdapter,
+    VoidSearchAdapter,
     WorkBotAdapter,
 )
 from app.services.bot_health import BotHealth
@@ -15,27 +20,29 @@ from app.utils.logger import get_logger
 
 
 FALLBACK_CHAINS = {
-    "cpf": ["dataflow", "work_bot", "black_consultas"],
-    "nome": ["dataflow", "work_bot", "black_consultas"],
-    "telefone": ["dataflow", "work_bot", "black_consultas"],
-    "email": ["dataflow", "work_bot", "black_consultas"],
-    "cep": ["dataflow", "work_bot", "black_consultas"],
-    "cnpj": ["dataflow", "work_bot"],
-    "titulo": ["dataflow", "work_bot"],
+    "cpf": ["dataflow", "work_bot", "unknowrealbot", "voidsearch", "black_consultas"],
+    "nome": ["dataflow", "work_bot", "unix_robot", "voidsearch", "black_consultas"],
+    "telefone": ["dataflow", "work_bot", "unknowrealbot", "voidsearch", "black_consultas"],
+    "email": ["dataflow", "work_bot", "unknowrealbot", "black_consultas"],
+    "cep": ["unix_robot", "dataflow", "work_bot", "voidsearch", "black_consultas"],
+    "cnpj": ["dataflow", "work_bot", "voidsearch"],
+    "titulo": ["dataflow", "work_bot", "unknowrealbot"],
     "bin": ["dataflow"],
+    "rg": ["work_bot", "unix_robot"],
+    "mae": ["work_bot", "dataflow", "unknowrealbot"],
+    "pai": ["work_bot", "unknowrealbot"],
+    "foto": ["work_bot", "dataflow", "unknowrealbot"],
+    "placa": ["work_bot", "unknowrealbot", "voidsearch"],
     "endereco": ["dataflow"],
-    "mae": ["work_bot", "dataflow"],
-    "foto": ["work_bot", "dataflow"],
-    "ip": ["black_consultas"],
-    "rg": ["work_bot"],
-    "pai": ["work_bot"],
-    "placa": ["work_bot"],
+    "ip": ["unknowrealbot", "voidsearch", "black_consultas"],
+    "ddd": ["voidsearch"],
     "proprietario": ["work_bot"],
     "cns": ["work_bot"],
     "chave": ["work_bot"],
-    "vizinhos": ["work_bot"],
-    "parentes": ["work_bot"],
+    "vizinhos": ["work_bot", "black_consultas"],
+    "parentes": ["work_bot", "black_consultas"],
     "pep": ["work_bot"],
+    "condutor": ["work_bot"],
     "frota": ["work_bot"],
     "processo_numero": ["work_bot"],
     "pix": ["black_consultas"],
@@ -51,10 +58,15 @@ class BotRouter:
         self._adapters = adapters or {
             "dataflow": DataFlowAdapter(),
             "work_bot": WorkBotAdapter(),
+            "unknowrealbot": UnknowrealbotAdapter(),
+            "unix_robot": UnixRobotAdapter(),
+            "voidsearch": VoidSearchAdapter(),
             "black_consultas": BlackConsultasAdapter(),
         }
         self._health_tracker = health_tracker or BotHealth()
         self._logger = get_logger("services.bot_router")
+        self._paid_only_by_type: dict[str, set[str]] = {}
+        self._paid_only_lock = Lock()
 
     async def route_query(
         self,
@@ -69,8 +81,22 @@ class BotRouter:
 
         failures: list[dict[str, Any]] = []
         preferred_exception: Exception | None = None
+        paid_only_exception: PaidOnlyError | None = None
+        skipped_paid_only = False
 
         for adapter_name in chain:
+            if self._is_paid_only(tipo, adapter_name):
+                skipped_paid_only = True
+                self._logger.info(
+                    "Adapter ignorado por bloqueio session-level após resposta de assinatura.",
+                    extra={
+                        "event": "bot_router_adapter_paid_only_skip",
+                        "adapter": adapter_name,
+                        "tipo": tipo,
+                    },
+                )
+                continue
+
             adapter = self._adapters.get(adapter_name)
             if adapter is None:
                 continue
@@ -105,6 +131,20 @@ class BotRouter:
                 result.setdefault("link", "")
                 result.setdefault("data", {})
                 return result
+            except PaidOnlyError as exc:
+                self._mark_paid_only(tipo, adapter_name)
+                failures.append(self._build_failure(adapter_name, exc))
+                paid_only_exception = paid_only_exception or exc
+                self._logger.info(
+                    "Adapter marcado como pago para este tipo e removido do chain em runtime.",
+                    extra={
+                        "event": "bot_router_paid_only",
+                        "adapter": adapter_name,
+                        "tipo": tipo,
+                        "base": base,
+                    },
+                )
+                continue
             except TimeoutError as exc:
                 self._health_tracker.mark_unhealthy(adapter_name, cooldown_seconds=60, reason="timeout")
                 failures.append(self._build_failure(adapter_name, exc))
@@ -152,7 +192,21 @@ class BotRouter:
                     },
                 )
 
+        if preferred_exception is None and paid_only_exception is not None:
+            preferred_exception = paid_only_exception
+        elif preferred_exception is None and skipped_paid_only:
+            preferred_exception = PaidOnlyError("Todos os bots compatíveis deste tipo exigem assinatura.")
+
         raise AllBotsFailedError(tipo, failures, preferred_exception=preferred_exception)
+
+    def _is_paid_only(self, tipo: str, adapter_name: str) -> bool:
+        with self._paid_only_lock:
+            return adapter_name in self._paid_only_by_type.get(tipo, set())
+
+    def _mark_paid_only(self, tipo: str, adapter_name: str) -> None:
+        with self._paid_only_lock:
+            blocked = self._paid_only_by_type.setdefault(tipo, set())
+            blocked.add(adapter_name)
 
     def _build_failure(self, adapter_name: str, exc: Exception) -> dict[str, Any]:
         error_type = type(exc).__name__

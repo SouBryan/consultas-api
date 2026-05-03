@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     telegram_group_id: int
     group_dataflow: int = -1003340385645
     group_tamaki: int = -1002411246251
+    group_don: int = -1002336848941
+    group_unen: int = -1003761336113
     telegram_timeout: int = 15
     rate_limit_interval: float = 3.0
     max_requests_per_minute: int = 20
