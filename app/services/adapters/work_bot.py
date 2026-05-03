@@ -13,6 +13,10 @@ from app.services.captcha_solver import CaptchaError, CaptchaSolver
 
 FIELD_PATTERN = re.compile(r"^(?P<key>[^:]+):\s*(?P<value>.+)$")
 PERSON_PATTERN = re.compile(r"^\s*(?P<index>\d+)\.\s+(?P<name>.+)$")
+SECTION_HEADER_PATTERN = re.compile(
+    r"^(?:VIZINHO|PARENTE|MORADOR|REGISTRO|RESULTADO|PESSOA|PROPRIETARIO|VEICULO|PROCESSO|CONDUTOR|TELEFONE|EMAIL)\s+(?P<index>\d+)$",
+    re.IGNORECASE,
+)
 MORE_ITEMS_PATTERN = re.compile(r"^e mais\s+(?P<count>\d+)\s+(?P<label>.+)$", re.IGNORECASE)
 
 
@@ -225,9 +229,13 @@ class WorkBotAdapter(BotAdapter):
 
         self._raise_if_bot_error(private_message)
 
-        data = self._parse_result_text(tipo, private_message.raw_text or "")
-        if private_message.media is not None:
-            data.setdefault("has_media", True)
+        # Se o resultado veio como documento .txt, baixar e usar o conteúdo do arquivo
+        result_text = await self._extract_result_text(client, private_message)
+
+        # Verificar erros também no texto do documento
+        self._raise_common_bot_errors(result_text)
+
+        data = self._parse_result_text(tipo, result_text)
 
         return {
             "adapter": self.name,
@@ -425,6 +433,17 @@ class WorkBotAdapter(BotAdapter):
             )
         return result_msg
 
+    async def _extract_result_text(self, client: TelegramClient, message: Message) -> str:
+        """Extrai texto do resultado: do documento .txt se houver, ou do raw_text da mensagem."""
+        if message.media is not None:
+            try:
+                file_bytes = await client.download_media(message.media, bytes)
+                if isinstance(file_bytes, (bytes, bytearray)):
+                    return file_bytes.decode("utf-8", errors="replace")
+            except Exception:
+                pass
+        return message.raw_text or ""
+
     async def _resolve_bot_entity_id(self, client: TelegramClient) -> int | None:
         try:
             entity = await client.get_entity(self.bot_username)
@@ -532,6 +551,13 @@ class WorkBotAdapter(BotAdapter):
             "cep": "moradores",
             "vizinhos": "vizinhos",
             "parentes": "parentes",
+            "pai": "pessoas",
+            "nome": "pessoas",
+            "mae": "pessoas",
+            "condutor": "condutores",
+            "frota": "veiculos",
+            "processo": "processos",
+            "processo_numero": "processos",
         }
         collection_key = collection_key_map.get(tipo, "registros")
 
@@ -541,7 +567,6 @@ class WorkBotAdapter(BotAdapter):
         for raw_line in text.splitlines():
             line = self._clean_line(raw_line)
             if not line:
-                current_item = None
                 continue
 
             if self._is_divider(line):
@@ -551,6 +576,12 @@ class WorkBotAdapter(BotAdapter):
             person_match = PERSON_PATTERN.match(stripped)
             if person_match is not None:
                 current_item = {"nome": person_match.group("name").strip()}
+                items.append(current_item)
+                continue
+
+            section_match = SECTION_HEADER_PATTERN.match(stripped)
+            if section_match is not None:
+                current_item = {}
                 items.append(current_item)
                 continue
 
@@ -581,6 +612,14 @@ class WorkBotAdapter(BotAdapter):
             line = self._clean_line(raw_line)
             if not line or self._is_divider(line):
                 continue
+
+            stripped = self._strip_leading_emoji(line)
+
+            # Parar ao encontrar header de seção (itens ficam no _parse_people_result)
+            if SECTION_HEADER_PATTERN.match(stripped):
+                break
+            if PERSON_PATTERN.match(stripped):
+                break
 
             field = self._extract_field(line)
             if field is None:

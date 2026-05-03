@@ -115,6 +115,8 @@ class BotAdapter(ABC):
 
         if "assinatura ativa" in normalized or "planos privados" in normalized:
             raise PaidOnlyError("Base requer assinatura")
+        if "nao tem acesso" in normalized or "entre em contato com o administrador" in normalized:
+            raise PaidOnlyError("Módulo requer acesso/assinatura")
         if "manutencao" in normalized:
             raise BotResponseError("maintenance", "Em manutenção")
         if "invalido" in normalized:
