@@ -12,7 +12,6 @@ from app.models.requests import (
     ConsultaChaveRequest,
     ConsultaCNPJRequest,
     ConsultaCNSRequest,
-    ConsultaCondutorRequest,
     ConsultaCPFRequest,
     ConsultaEmailRequest,
     ConsultaEnderecoRequest,
@@ -451,12 +450,6 @@ def _build_generic_execution_args(
             if payload.base is not None:
                 raise ValueError("Tipo de consulta 'pep' não aceita base.")
             specific = ConsultaPEPRequest.model_validate({"cpf": payload.input})
-            return payload.tipo, specific.query_input, None
-
-        if payload.tipo == "condutor":
-            if payload.base is not None:
-                raise ValueError("Tipo de consulta 'condutor' não aceita base.")
-            specific = ConsultaCondutorRequest.model_validate({"cpf": payload.input})
             return payload.tipo, specific.query_input, None
 
         if payload.tipo == "frota":
@@ -997,32 +990,6 @@ async def consulta_pep(
         runtime_state=runtime_state,
         bot_router=bot_router,
         tipo="pep",
-        query_input=payload.query_input,
-    )
-
-
-@router.post(
-    "/condutor",
-    response_model=ConsultaResponse,
-    summary="Consultar condutor",
-    description="Consulta condutor usando o Work Bot nesta fase.",
-    responses=COMMON_ERROR_RESPONSES,
-)
-async def consulta_condutor(
-    response: Response,
-    payload: ConsultaCondutorRequest,
-    pool: AccountPool = Depends(get_pool),
-    cache: ResultCache = Depends(get_cache),
-    runtime_state: RuntimeState = Depends(get_runtime_state),
-    bot_router: BotRouter = Depends(get_bot_router),
-):
-    return await _execute_consulta(
-        response=response,
-        cache=cache,
-        pool=pool,
-        runtime_state=runtime_state,
-        bot_router=bot_router,
-        tipo="condutor",
         query_input=payload.query_input,
     )
 

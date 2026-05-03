@@ -14,7 +14,7 @@ from app.services.captcha_solver import CaptchaError, CaptchaSolver
 FIELD_PATTERN = re.compile(r"^(?P<key>[^:]+):\s*(?P<value>.+)$")
 PERSON_PATTERN = re.compile(r"^\s*(?P<index>\d+)\.\s+(?P<name>.+)$")
 SECTION_HEADER_PATTERN = re.compile(
-    r"^(?:VIZINHO|PARENTE|MORADOR|REGISTRO|RESULTADO|PESSOA|PROPRIETARIO|VEICULO|PROCESSO|CONDUTOR|TELEFONE|EMAIL)\s+(?P<index>\d+)$",
+    r"^(?:VIZINHO|PARENTE|MORADOR|REGISTRO|RESULTADO|PESSOA|PROPRIETARIO|VEICULO|PROCESSO|TELEFONE|EMAIL)\s+(?P<index>\d+)$",
     re.IGNORECASE,
 )
 MORE_ITEMS_PATTERN = re.compile(r"^e mais\s+(?P<count>\d+)\s+(?P<label>.+)$", re.IGNORECASE)
@@ -43,7 +43,6 @@ class WorkBotAdapter(BotAdapter):
         "vizinhos",
         "parentes",
         "foto",
-        "condutor",
         "placa",
         "proprietario",
         "pep",
@@ -67,7 +66,6 @@ class WorkBotAdapter(BotAdapter):
         "vizinhos": "BASEDATA",
         "parentes": "BASEDATA",
         "foto": "PRO",
-        "condutor": "PRO",
         "placa": "Proprietarios",
         "proprietario": "Proprietarios",
         "pep": "PEP",
@@ -622,7 +620,6 @@ class WorkBotAdapter(BotAdapter):
             "pai": "pessoas",
             "nome": "pessoas",
             "mae": "pessoas",
-            "condutor": "condutores",
             "frota": "veiculos",
             "processo": "processos",
             "processo_numero": "processos",

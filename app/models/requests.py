@@ -25,7 +25,6 @@ ConsultationType = Literal[
     "vizinhos",
     "parentes",
     "pep",
-    "condutor",
     "frota",
     "processo_numero",
     "ip",
@@ -450,24 +449,6 @@ class ConsultaPEPRequest(BaseModel):
     model_config = ConfigDict(json_schema_extra={"example": {"cpf": "07068093868"}})
 
     cpf: str = Field(description="CPF com 11 dígitos usado na consulta de PEP.")
-
-    @field_validator("cpf")
-    @classmethod
-    def validate_cpf(cls, value: str) -> str:
-        digits_only = _normalize_digits(value)
-        if len(digits_only) != 11:
-            raise ValueError("CPF deve conter 11 dígitos.")
-        return digits_only
-
-    @property
-    def query_input(self) -> str:
-        return self.cpf
-
-
-class ConsultaCondutorRequest(BaseModel):
-    model_config = ConfigDict(json_schema_extra={"example": {"cpf": "07068093868"}})
-
-    cpf: str = Field(description="CPF com 11 dígitos usado na consulta de condutor.")
 
     @field_validator("cpf")
     @classmethod
