@@ -60,6 +60,37 @@ class AccountPool:
                 await self._rate_limiter.wait(label)
             return label, client
 
+    async def try_acquire(
+        self,
+        exclude_labels: set[str] | None = None,
+    ) -> tuple[str, TelegramClient] | None:
+        excluded = exclude_labels or set()
+
+        async with self._selection_lock:
+            selected: tuple[str, TelegramClient] | None = None
+            total_accounts = len(self._labels)
+
+            for offset in range(total_accounts):
+                index = (self._index + offset) % total_accounts
+                label = self._labels[index]
+                account_lock = self._locks[label]
+
+                if label in excluded or account_lock.locked():
+                    continue
+
+                await account_lock.acquire()
+                self._index = (index + 1) % total_accounts
+                selected = (label, self._clients[label])
+                break
+
+            if selected is None:
+                return None
+
+        label, client = selected
+        if self._rate_limiter is not None:
+            await self._rate_limiter.wait(label)
+        return label, client
+
     def release(self, label: str) -> None:
         try:
             account_lock = self._locks[label]

@@ -1,4 +1,5 @@
 import base64
+import asyncio
 import time
 from typing import Any
 
@@ -110,6 +111,9 @@ class CaptchaSolver:
                         "model": MODEL,
                     },
                 )
+
+            if attempt < MAX_RETRIES:
+                await asyncio.sleep(1)
 
         raise CaptchaError(
             f"Captcha não resolvido após {MAX_RETRIES} tentativas. Opções: {options}"

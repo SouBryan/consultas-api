@@ -145,7 +145,7 @@ class DataFlowAdapter(BotAdapter):
         # Registra handler ANTES de enviar para evitar race condition
         bot_reply_future, close_reply = await self._setup_group_waiter(client)
         try:
-            sent_message = await client.send_message(self.group_id, command)
+            sent_message = await self.send_group_message(client, command)
             bot_reply = await self._await_group_reply(
                 bot_reply_future, sent_message, timeout=settings.telegram_timeout
             )

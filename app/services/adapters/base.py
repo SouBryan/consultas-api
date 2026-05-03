@@ -49,9 +49,13 @@ class BotAdapter(ABC):
     group_id: int = 0
     bot_username: str = ""
     supported_commands: tuple[str, ...] = ()
+    _group_rate_limiter: Any = None
 
     def supports(self, tipo: str, base: str | None = None) -> bool:
         return tipo in self.supported_commands
+
+    def set_group_rate_limiter(self, group_rate_limiter: Any) -> None:
+        self._group_rate_limiter = group_rate_limiter
 
     @abstractmethod
     async def execute(
@@ -62,6 +66,15 @@ class BotAdapter(ABC):
         base: str | None = None,
     ) -> dict[str, Any]:
         """Executa a consulta e retorna resultado estruturado."""
+
+    async def send_group_message(
+        self,
+        client: TelegramClient,
+        message: str,
+    ) -> Message:
+        if self._group_rate_limiter is not None:
+            await self._group_rate_limiter.wait(self.group_id, adapter=self.name)
+        return await client.send_message(self.group_id, message)
 
     async def wait_for_bot_reply(
         self,

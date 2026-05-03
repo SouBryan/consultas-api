@@ -71,7 +71,7 @@ class UnknowrealbotAdapter(BotAdapter):
         collected, close_collector = self._setup_group_collector(client, bot_entity_id)
 
         try:
-            sent_message = await client.send_message(self.group_id, command)
+            sent_message = await self.send_group_message(client, command)
             bot_reply = await self._await_group_reply(
                 collected,
                 sent_message.id,

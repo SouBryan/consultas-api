@@ -125,7 +125,7 @@ class BlackConsultasAdapter(BotAdapter):
         command: str,
         base_button_text: str | None,
     ) -> str:
-        sent_message = await client.send_message(self.group_id, command)
+        sent_message = await self.send_group_message(client, command)
         bot_reply = await self.wait_for_bot_reply(client, sent_message, timeout=TIMEOUT_SECONDS)
         self._raise_if_bot_error(bot_reply)
 

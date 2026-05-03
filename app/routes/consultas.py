@@ -41,7 +41,7 @@ from app.services.adapters import AllBotsFailedError, BotResponseError
 from app.services.bot_router import BotRouter
 from app.services.cache import ResultCache
 from app.services.runtime_state import RuntimeState
-from app.utils.logger import get_logger
+from app.utils.logger import get_logger, get_request_id
 
 
 router = APIRouter(prefix="/api/consulta", tags=["consultas"])
@@ -87,9 +87,20 @@ async def _execute_consulta(
     base: str | None = None,
 ) -> dict[str, Any]:
     command = _build_cache_command(tipo, query_input)
+    request_id = get_request_id()
     await runtime_state.start_query()
 
     try:
+        logger.info(
+            "Iniciando consulta.",
+            extra={
+                "event": "consulta_started",
+                "tipo": tipo,
+                "input": query_input,
+                "base": base,
+            },
+        )
+
         cached_payload = cache.get(command, base)
 
         if cached_payload is not None:
@@ -105,233 +116,212 @@ async def _execute_consulta(
             response.headers["X-Cache"] = "HIT"
             return cached_payload
 
+        stale_payload = cache.get_stale(command, base)
         started_at = time.monotonic()
-        tried_labels: set[str] = set()
-        timeout_failures: list[dict[str, Any]] = []
-        max_attempts = min(2, pool.size)
+        try:
+            adapter_result = await bot_router.route_query_with_pool(pool, tipo, query_input, base)
+            payload = _build_success_payload(adapter_result)
+            cache.set(command, base, payload)
+            response.headers["X-Cache"] = "MISS"
 
-        for attempt in range(1, max_attempts + 1):
-            label, client = await pool.acquire(exclude_labels=tried_labels)
-            attempt_started_at = time.monotonic()
+            logger.info(
+                "Consulta concluída com sucesso.",
+                extra={
+                    "event": "consulta_success",
+                    "tipo": tipo,
+                    "input": query_input,
+                    "base": base,
+                    "account": adapter_result.get("account"),
+                    "adapter": adapter_result.get("adapter"),
+                    "duration_ms": round((time.monotonic() - started_at) * 1000, 2),
+                    "cache": "MISS",
+                },
+            )
+            return payload
+        except AllBotsFailedError as exc:
+            preferred_exception = exc.preferred_exception
 
-            try:
-                adapter_result = await bot_router.route_query(client, tipo, query_input, base)
-                payload = _build_success_payload(adapter_result)
-                cache.set(command, base, payload)
-                response.headers["X-Cache"] = "MISS"
-
-                logger.info(
-                    "Consulta concluída com sucesso.",
-                    extra={
-                        "event": "consulta_success",
-                        "tipo": tipo,
-                        "input": query_input,
-                        "base": base,
-                        "account": label,
-                        "adapter": adapter_result.get("adapter"),
-                        "attempt": attempt,
-                        "retry_used": attempt > 1,
-                        "timeout_failures": timeout_failures,
-                        "duration_ms": round((time.monotonic() - started_at) * 1000, 2),
-                        "cache": "MISS",
-                    },
-                )
-                return payload
-            except AllBotsFailedError as exc:
-                preferred_exception = exc.preferred_exception
-
-                if isinstance(preferred_exception, TimeoutError):
-                    tried_labels.add(label)
-                    timeout_failures.append(
-                        {
-                            "account": label,
-                            "message": str(preferred_exception),
-                            "duration_ms": round((time.monotonic() - attempt_started_at) * 1000, 2),
-                            "bot_failures": exc.failures,
-                        }
-                    )
-                    logger.warning(
-                        "Timeout ao consultar chain de bots.",
-                        extra={
-                            "event": "consulta_timeout",
-                            "tipo": tipo,
-                            "input": query_input,
-                            "base": base,
-                            "account": label,
-                            "attempt": attempt,
-                            "failures": exc.failures,
-                            "duration_ms": round((time.monotonic() - attempt_started_at) * 1000, 2),
-                        },
-                    )
-                    continue
-
-                if isinstance(preferred_exception, BotResponseError):
-                    await runtime_state.record_error(
-                        preferred_exception.error_code,
-                        str(preferred_exception),
-                        tipo=tipo,
-                        input=query_input,
-                        base=base,
-                        account=label,
-                        attempt=attempt,
-                        failures=exc.failures,
-                    )
-                    logger.warning(
-                        "Todos os bots do chain falharam com erro de negócio.",
-                        extra={
-                            "event": "bot_chain_error",
-                            "tipo": tipo,
-                            "input": query_input,
-                            "base": base,
-                            "account": label,
-                            "error_code": preferred_exception.error_code,
-                            "status_code": preferred_exception.status_code,
-                            "failures": exc.failures,
-                            "duration_ms": round((time.monotonic() - attempt_started_at) * 1000, 2),
-                        },
-                    )
-                    raise HTTPException(
-                        status_code=preferred_exception.status_code,
-                        detail=str(preferred_exception),
-                        headers={"X-Cache": "MISS"},
-                    ) from preferred_exception
-
-                if isinstance(preferred_exception, ValueError):
-                    await runtime_state.record_error(
-                        "validation",
-                        str(preferred_exception),
-                        tipo=tipo,
-                        input=query_input,
-                        base=base,
-                        account=label,
-                        attempt=attempt,
-                        failures=exc.failures,
-                    )
-                    logger.warning(
-                        "Todos os bots do chain falharam por validação.",
-                        extra={
-                            "event": "consulta_validation_error",
-                            "tipo": tipo,
-                            "input": query_input,
-                            "base": base,
-                            "account": label,
-                            "failures": exc.failures,
-                            "duration_ms": round((time.monotonic() - attempt_started_at) * 1000, 2),
-                        },
-                    )
-                    raise HTTPException(
-                        status_code=422,
-                        detail=str(preferred_exception),
-                        headers={"X-Cache": "MISS"},
-                    ) from preferred_exception
-
+            if stale_payload is not None:
+                response.headers["X-Cache"] = "STALE"
                 await runtime_state.record_error(
-                    "bots_failed",
-                    str(exc),
+                    "stale_fallback",
+                    "Todos os bots falharam; retornando cache stale.",
+                    request_id=request_id,
                     tipo=tipo,
                     input=query_input,
                     base=base,
-                    account=label,
-                    attempt=attempt,
                     failures=exc.failures,
                 )
-                logger.error(
-                    "Nenhum bot do chain conseguiu atender a consulta.",
+                logger.warning(
+                    "Todos os bots falharam; resposta stale servida do cache.",
                     extra={
-                        "event": "consulta_all_bots_failed",
+                        "event": "consulta_cache_stale",
                         "tipo": tipo,
                         "input": query_input,
                         "base": base,
-                        "account": label,
                         "failures": exc.failures,
-                        "duration_ms": round((time.monotonic() - attempt_started_at) * 1000, 2),
+                        "duration_ms": round((time.monotonic() - started_at) * 1000, 2),
+                    },
+                )
+                return stale_payload
+
+            if isinstance(preferred_exception, BotResponseError):
+                await runtime_state.record_error(
+                    preferred_exception.error_code,
+                    str(preferred_exception),
+                    request_id=request_id,
+                    tipo=tipo,
+                    input=query_input,
+                    base=base,
+                    failures=exc.failures,
+                )
+                logger.warning(
+                    "Todos os bots do chain falharam com erro de negócio.",
+                    extra={
+                        "event": "bot_chain_error",
+                        "tipo": tipo,
+                        "input": query_input,
+                        "base": base,
+                        "error_code": preferred_exception.error_code,
+                        "status_code": preferred_exception.status_code,
+                        "failures": exc.failures,
+                        "duration_ms": round((time.monotonic() - started_at) * 1000, 2),
                     },
                 )
                 raise HTTPException(
-                    status_code=503,
-                    detail="Nenhum bot disponível conseguiu responder à consulta.",
+                    status_code=preferred_exception.status_code,
+                    detail=str(preferred_exception),
                     headers={"X-Cache": "MISS"},
-                ) from exc
-            except ValueError as exc:
+                ) from preferred_exception
+
+            if isinstance(preferred_exception, TimeoutError):
                 await runtime_state.record_error(
-                    "validation",
-                    str(exc),
+                    "timeout",
+                    str(preferred_exception),
+                    request_id=request_id,
                     tipo=tipo,
                     input=query_input,
                     base=base,
-                    account=label,
-                    attempt=attempt,
+                    failures=exc.failures,
+                )
+                logger.error(
+                    "Consulta falhou por timeout em todos os adapters tentados.",
+                    extra={
+                        "event": "consulta_retry_exhausted",
+                        "tipo": tipo,
+                        "input": query_input,
+                        "base": base,
+                        "failures": exc.failures,
+                        "duration_ms": round((time.monotonic() - started_at) * 1000, 2),
+                    },
+                )
+                raise HTTPException(
+                    status_code=504,
+                    detail="Bot não respondeu em nenhuma das contas disponíveis.",
+                    headers={"X-Cache": "MISS"},
+                ) from preferred_exception
+
+            if isinstance(preferred_exception, ValueError):
+                await runtime_state.record_error(
+                    "validation",
+                    str(preferred_exception),
+                    request_id=request_id,
+                    tipo=tipo,
+                    input=query_input,
+                    base=base,
+                    failures=exc.failures,
                 )
                 logger.warning(
-                    "Erro de validação durante a consulta.",
+                    "Todos os bots do chain falharam por validação.",
                     extra={
                         "event": "consulta_validation_error",
                         "tipo": tipo,
                         "input": query_input,
                         "base": base,
-                        "account": label,
-                        "duration_ms": round((time.monotonic() - attempt_started_at) * 1000, 2),
+                        "failures": exc.failures,
+                        "duration_ms": round((time.monotonic() - started_at) * 1000, 2),
                     },
                 )
                 raise HTTPException(
                     status_code=422,
-                    detail=str(exc),
+                    detail=str(preferred_exception),
                     headers={"X-Cache": "MISS"},
-                ) from exc
-            except Exception as exc:
-                await runtime_state.record_error(
-                    "system",
-                    "Erro interno ao processar consulta.",
-                    tipo=tipo,
-                    input=query_input,
-                    base=base,
-                    account=label,
-                    attempt=attempt,
-                )
-                logger.error(
-                    "Falha inesperada ao processar consulta.",
-                    extra={
-                        "event": "consulta_system_error",
-                        "tipo": tipo,
-                        "input": query_input,
-                        "base": base,
-                        "account": label,
-                        "duration_ms": round((time.monotonic() - attempt_started_at) * 1000, 2),
-                    },
-                    exc_info=exc,
-                )
-                raise HTTPException(
-                    status_code=500,
-                    detail="Erro interno ao processar consulta.",
-                    headers={"X-Cache": "MISS"},
-                ) from exc
-            finally:
-                pool.release(label)
+                ) from preferred_exception
 
-        await runtime_state.record_error(
-            "timeout",
-            "Bot não respondeu em nenhuma das contas disponíveis.",
-            tipo=tipo,
-            input=query_input,
-            base=base,
-            timeouts=timeout_failures,
-        )
-        logger.error(
-            "Consulta falhou após esgotar retry por timeout.",
-            extra={
-                "event": "consulta_retry_exhausted",
-                "tipo": tipo,
-                "input": query_input,
-                "base": base,
-                "timeouts": timeout_failures,
-                "duration_ms": round((time.monotonic() - started_at) * 1000, 2),
-            },
-        )
-        raise HTTPException(
-            status_code=504,
-            detail="Bot não respondeu em nenhuma das contas disponíveis.",
-            headers={"X-Cache": "MISS"},
-        )
+            await runtime_state.record_error(
+                "bots_failed",
+                str(exc),
+                request_id=request_id,
+                tipo=tipo,
+                input=query_input,
+                base=base,
+                failures=exc.failures,
+            )
+            logger.error(
+                "Nenhum bot do chain conseguiu atender a consulta.",
+                extra={
+                    "event": "consulta_all_bots_failed",
+                    "tipo": tipo,
+                    "input": query_input,
+                    "base": base,
+                    "failures": exc.failures,
+                    "duration_ms": round((time.monotonic() - started_at) * 1000, 2),
+                },
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Nenhum bot disponível conseguiu responder à consulta.",
+                headers={"X-Cache": "MISS"},
+            ) from exc
+        except ValueError as exc:
+            await runtime_state.record_error(
+                "validation",
+                str(exc),
+                request_id=request_id,
+                tipo=tipo,
+                input=query_input,
+                base=base,
+            )
+            logger.warning(
+                "Erro de validação durante a consulta.",
+                extra={
+                    "event": "consulta_validation_error",
+                    "tipo": tipo,
+                    "input": query_input,
+                    "base": base,
+                    "duration_ms": round((time.monotonic() - started_at) * 1000, 2),
+                },
+            )
+            raise HTTPException(
+                status_code=422,
+                detail=str(exc),
+                headers={"X-Cache": "MISS"},
+            ) from exc
+        except Exception as exc:
+            await runtime_state.record_error(
+                "system",
+                "Erro interno ao processar consulta.",
+                request_id=request_id,
+                tipo=tipo,
+                input=query_input,
+                base=base,
+            )
+            logger.error(
+                "Falha inesperada ao processar consulta.",
+                extra={
+                    "event": "consulta_system_error",
+                    "tipo": tipo,
+                    "input": query_input,
+                    "base": base,
+                    "duration_ms": round((time.monotonic() - started_at) * 1000, 2),
+                },
+                exc_info=exc,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="Erro interno ao processar consulta.",
+                headers={"X-Cache": "MISS"},
+            ) from exc
     finally:
         await runtime_state.finish_query()
 

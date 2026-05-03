@@ -1,0 +1,12 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Start consultas-api server",
+			"type": "shell",
+			"command": "c:\\Users\\Bryan\\Documents\\Projetos\\consultas-api\\.venv\\Scripts\\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000",
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}

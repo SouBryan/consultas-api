@@ -61,7 +61,7 @@ class VoidSearchAdapter(BotAdapter):
         collected, close_collector = self._setup_group_collector(client, bot_entity_id)
 
         try:
-            sent_message = await client.send_message(self.group_id, command)
+            sent_message = await self.send_group_message(client, command)
             initial_reply = await self._await_first_reply(
                 collected,
                 sent_message.id,

@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 import time
+import uuid
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,15 +10,17 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 
 from app.config import settings
+from app.models.requests import ConsultationType
 from app.models.responses import HealthResponse, StatusResponse
 from app.services.account_pool import AccountPool
 from app.services.bot_health import BotHealth
 from app.services.bot_router import BotRouter
 from app.services.cache import ResultCache
+from app.services.group_rate_limiter import GroupRateLimiter
 from app.services.rate_limiter import RateLimiter
 from app.services.request_rate_limiter import RequestRateLimiter
 from app.services.runtime_state import RuntimeState
-from app.utils.logger import configure_logging, get_logger
+from app.utils.logger import configure_logging, get_logger, log_context
 
 
 configure_logging()
@@ -57,13 +60,15 @@ def get_bot_router(request: Request) -> BotRouter:
 async def lifespan(app: FastAPI):
     clients = await _connect_clients()
     rate_limiter = RateLimiter(settings.rate_limit_interval)
+    group_rate_limiter = GroupRateLimiter(2.0)
     bot_health = BotHealth()
     app.state.pool = AccountPool(clients, rate_limiter=rate_limiter)
     app.state.cache = ResultCache(settings.cache_ttl_hours)
     app.state.request_rate_limiter = RequestRateLimiter(settings.max_requests_per_minute)
     app.state.runtime_state = RuntimeState()
     app.state.bot_health = bot_health
-    app.state.bot_router = BotRouter(health_tracker=bot_health)
+    app.state.group_rate_limiter = group_rate_limiter
+    app.state.bot_router = BotRouter(health_tracker=bot_health, group_rate_limiter=group_rate_limiter)
     app.state.clients = clients
     app.state.started_at = time.monotonic()
 
@@ -140,7 +145,7 @@ app = FastAPI(
         "API REST para automatizar consultas via múltiplos bots Telegram, "
         "com balanceamento entre contas, cache, fallback e documentação OpenAPI."
     ),
-    version="0.5.0",
+    version="0.6.0",
     openapi_tags=[
         {"name": "consultas", "description": "Endpoints de consulta com fallback automático entre bots suportados."},
         {"name": "system", "description": "Endpoints de saúde, status e monitoramento da API."},
@@ -172,61 +177,77 @@ def _get_client_ip(request: Request) -> str:
 
 @app.middleware("http")
 async def enforce_api_security(request: Request, call_next):
-    if not request.url.path.startswith("/api/") or request.url.path == "/api/health":
-        return await call_next(request)
+    request_id = uuid.uuid4().hex
+    request.state.request_id = request_id
 
-    client_ip = _get_client_ip(request)
-    allowed_api_keys = settings.allowed_api_keys
-    if not allowed_api_keys:
-        logger.error(
-            "Nenhuma API key configurada para endpoints protegidos.",
-            extra={
-                "event": "api_auth_not_configured",
-                "path": request.url.path,
-            },
-        )
-        return JSONResponse(
-            status_code=503,
-            content={"detail": "Autenticação não configurada no servidor."},
-        )
+    with log_context(request_id=request_id, path=request.url.path, method=request.method):
+        if not request.url.path.startswith("/api/") or request.url.path == "/api/health":
+            response = await call_next(request)
+            response.headers.setdefault("X-Request-ID", request_id)
+            return response
 
-    provided_api_key = request.headers.get("X-API-Key", "").strip()
-    if provided_api_key not in allowed_api_keys:
-        logger.warning(
-            "Falha de autenticação por API key.",
-            extra={
-                "event": "api_auth_failed",
-                "ip": client_ip,
-                "path": request.url.path,
-            },
-        )
-        return JSONResponse(
-            status_code=401,
-            content={"detail": "API key ausente ou inválida."},
-        )
+        client_ip = _get_client_ip(request)
+        allowed_api_keys = settings.allowed_api_keys
+        if not allowed_api_keys:
+            logger.error(
+                "Nenhuma API key configurada para endpoints protegidos.",
+                extra={
+                    "event": "api_auth_not_configured",
+                    "path": request.url.path,
+                },
+            )
+            response = JSONResponse(
+                status_code=503,
+                content={"detail": "Autenticação não configurada no servidor."},
+            )
+            response.headers.setdefault("X-Request-ID", request_id)
+            return response
 
-    limiter = getattr(request.app.state, "request_rate_limiter", None)
-    if limiter is None:
-        return await call_next(request)
+        provided_api_key = request.headers.get("X-API-Key", "").strip()
+        if provided_api_key not in allowed_api_keys:
+            logger.warning(
+                "Falha de autenticação por API key.",
+                extra={
+                    "event": "api_auth_failed",
+                    "ip": client_ip,
+                    "path": request.url.path,
+                },
+            )
+            response = JSONResponse(
+                status_code=401,
+                content={"detail": "API key ausente ou inválida."},
+            )
+            response.headers.setdefault("X-Request-ID", request_id)
+            return response
 
-    allowed, retry_after = await limiter.check(client_ip)
-    if not allowed:
-        logger.warning(
-            "Rate limit da API excedido.",
-            extra={
-                "event": "api_rate_limit_hit",
-                "ip": client_ip,
-                "path": request.url.path,
-                "retry_after": retry_after,
-            },
-        )
-        return JSONResponse(
-            status_code=429,
-            content={"detail": "Rate limit excedido. Tente novamente mais tarde."},
-            headers={"Retry-After": str(retry_after)},
-        )
+        limiter = getattr(request.app.state, "request_rate_limiter", None)
+        if limiter is None:
+            response = await call_next(request)
+            response.headers.setdefault("X-Request-ID", request_id)
+            return response
 
-    return await call_next(request)
+        allowed, retry_after = await limiter.check(client_ip)
+        if not allowed:
+            logger.warning(
+                "Rate limit da API excedido.",
+                extra={
+                    "event": "api_rate_limit_hit",
+                    "ip": client_ip,
+                    "path": request.url.path,
+                    "retry_after": retry_after,
+                },
+            )
+            response = JSONResponse(
+                status_code=429,
+                content={"detail": "Rate limit excedido. Tente novamente mais tarde."},
+                headers={"Retry-After": str(retry_after)},
+            )
+            response.headers.setdefault("X-Request-ID", request_id)
+            return response
+
+        response = await call_next(request)
+        response.headers.setdefault("X-Request-ID", request_id)
+        return response
 
 
 @app.get(
@@ -276,6 +297,67 @@ async def status_check(request: Request) -> dict[str, object]:
         "uptime": round(uptime, 3),
         "queries_today": runtime_snapshot["queries_today"],
         "last_error": runtime_snapshot["last_error"],
+    }
+
+
+@app.get(
+    "/api/status/bots",
+    tags=["system"],
+    summary="Status detalhado dos adapters",
+    description="Retorna health, taxa de sucesso, tempo médio e estado do circuit breaker por adapter.",
+)
+async def bot_status_check(request: Request) -> dict[str, dict[str, object]]:
+    bot_router = get_bot_router(request)
+    return bot_router.get_bot_statuses()
+
+
+@app.get(
+    "/api/debug/chain/{tipo}",
+    tags=["system"],
+    summary="Diagnóstico da chain de fallback",
+    description="Mostra a ordem de fallback para um tipo de consulta e o estado atual de cada adapter.",
+)
+async def debug_chain(
+    request: Request,
+    tipo: ConsultationType,
+    base: str | None = None,
+) -> dict[str, object]:
+    bot_router = get_bot_router(request)
+    return bot_router.describe_chain(tipo, base)
+
+
+@app.get(
+    "/api/debug/last-errors",
+    tags=["system"],
+    summary="Últimos erros registrados",
+    description="Retorna os últimos 50 erros registrados em memória para diagnóstico operacional.",
+)
+async def debug_last_errors(request: Request) -> dict[str, object]:
+    runtime_state = get_runtime_state(request)
+    return {"errors": await runtime_state.last_errors(50)}
+
+
+@app.delete(
+    "/api/cache/{tipo}/{query_input}",
+    tags=["system"],
+    summary="Invalidar cache manualmente",
+    description="Remove entradas de cache por tipo e input, opcionalmente filtrando pela base.",
+)
+async def delete_cache_entry(
+    request: Request,
+    tipo: ConsultationType,
+    query_input: str,
+    base: str | None = None,
+) -> dict[str, object]:
+    cache = get_cache(request)
+    command = f"/{tipo} {query_input}".strip()
+    deleted = cache.delete(command, base)
+    return {
+        "status": "ok",
+        "tipo": tipo,
+        "input": query_input,
+        "base": base,
+        "deleted": deleted,
     }
 
 
