@@ -52,7 +52,6 @@ FALLBACK_CHAINS = {
     "condutor": ["work_bot"],
     "frota": ["work_bot"],
     "processo_numero": ["work_bot"],
-    "pix": ["black_consultas"],
 }
 
 

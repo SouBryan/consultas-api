@@ -27,7 +27,6 @@ from app.models.requests import (
     ConsultaPaiRequest,
     ConsultaParentesRequest,
     ConsultaPEPRequest,
-    ConsultaPIXRequest,
     ConsultaPlacaRequest,
     ConsultaProcessoNumeroRequest,
     ConsultaProprietarioRequest,
@@ -268,14 +267,6 @@ CONSULTATION_OPENAPI_METADATA: dict[str, dict[str, Any]] = {
         "what": "Consulta um título de eleitor e retorna dados eleitorais básicos quando disponíveis.",
         "request_example": {"titulo": "018921371805"},
         "response_example": _success_example({"dados_basicos": {"titulo": "018921371805", "nome": "JOAO DA SILVA", "zona": "123", "secao": "456"}}),
-    },
-    "/pix": {
-        "tipo": "pix",
-        "tag": "Pessoa",
-        "summary": "Consultar PIX",
-        "what": "Consulta a base PIX padrão do Black Consultas usando nome e meio CPF como entrada.",
-        "request_example": {"nome": "douglas da costa silva", "meio_cpf": "226471"},
-        "response_example": _success_example({"dados_basicos": {"nome": "DOUGLAS DA COSTA SILVA", "meio_cpf": "226471", "instituicao": "BANCO EXEMPLO"}}, link="https://blackconsultas.com/result-consultation/pix_abc123?bot="),
     },
     "": {
         "tipo": None,
@@ -756,17 +747,6 @@ def _build_generic_execution_args(
             specific = ConsultaTituloRequest.model_validate({"titulo": payload.input})
             return payload.tipo, specific.query_input, normalized_base
 
-        if payload.tipo == "pix":
-            normalized_base = payload.base or "pix"
-            if normalized_base not in {"pix", "pix2"}:
-                raise ValueError("Tipo de consulta 'pix' só aceita as bases 'pix' ou 'pix2'.")
-            nome, separator, meio_cpf = payload.input.partition("|")
-            if not separator:
-                raise ValueError("Input de PIX deve seguir o formato 'nome completo|123456'.")
-            specific = ConsultaPIXRequest.model_validate(
-                {"nome": nome, "meio_cpf": meio_cpf}
-            )
-            return payload.tipo, specific.query_input, normalized_base
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
     except ValueError as exc:
@@ -1427,33 +1407,6 @@ async def consulta_titulo(
         tipo="titulo",
         query_input=payload.query_input,
         base="titulo",
-    )
-
-
-@router.post(
-    "/pix",
-    response_model=ConsultaResponse,
-    summary="Consultar PIX",
-    description="Consulta PIX usando o Black Consultas nesta fase da arquitetura multi-bot.",
-    responses=COMMON_ERROR_RESPONSES,
-)
-async def consulta_pix(
-    response: Response,
-    payload: ConsultaPIXRequest,
-    pool: AccountPool = Depends(get_pool),
-    cache: ResultCache = Depends(get_cache),
-    runtime_state: RuntimeState = Depends(get_runtime_state),
-    bot_router: BotRouter = Depends(get_bot_router),
-):
-    return await _execute_consulta(
-        response=response,
-        cache=cache,
-        pool=pool,
-        runtime_state=runtime_state,
-        bot_router=bot_router,
-        tipo="pix",
-        query_input=payload.query_input,
-        base="pix",
     )
 
 

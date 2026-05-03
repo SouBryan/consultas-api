@@ -31,7 +31,6 @@ ConsultationType = Literal[
     "ddd",
     "ip",
     "titulo",
-    "pix",
 ]
 
 
