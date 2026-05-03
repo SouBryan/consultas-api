@@ -16,6 +16,18 @@ ConsultationType = Literal[
     "endereco",
     "mae",
     "foto",
+    "rg",
+    "pai",
+    "placa",
+    "proprietario",
+    "cns",
+    "chave",
+    "vizinhos",
+    "parentes",
+    "pep",
+    "condutor",
+    "frota",
+    "processo_numero",
     "ip",
     "titulo",
     "pix",
@@ -51,6 +63,7 @@ CPF_BASE_BUTTON_MAP: dict[CPFBase, str] = {
 }
 
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+PLATE_PATTERN = re.compile(r"^[A-Z]{3}[0-9][A-Z0-9][0-9]{2}$")
 
 
 def _normalize_whitespace(value: str) -> str:
@@ -61,12 +74,37 @@ def _normalize_digits(value: str) -> str:
     return "".join(char for char in value if char.isdigit())
 
 
+def _normalize_alphanumeric(value: str) -> str:
+    return "".join(char for char in value if char.isalnum()).upper()
+
+
 def _validate_full_name(value: str, *, allow_single_word: bool = False) -> str:
     normalized = _normalize_whitespace(value)
     if len(normalized) < 3:
         raise ValueError("Nome deve conter pelo menos 3 caracteres.")
     if not allow_single_word and len(normalized.split()) < 2:
         raise ValueError("Nome deve conter pelo menos nome e sobrenome.")
+    return normalized
+
+
+def _validate_plate(value: str) -> str:
+    normalized = _normalize_alphanumeric(value)
+    if not PLATE_PATTERN.fullmatch(normalized):
+        raise ValueError("Placa deve estar no formato ABC1234 ou ABC1D23.")
+    return normalized
+
+
+def _validate_process_number(value: str) -> str:
+    normalized = re.sub(r"\s+", "", value)
+    if len(normalized) < 5:
+        raise ValueError("Número do processo deve conter pelo menos 5 caracteres.")
+    return normalized
+
+
+def _validate_rg(value: str) -> str:
+    normalized = _normalize_alphanumeric(value)
+    if len(normalized) < 5:
+        raise ValueError("RG deve conter pelo menos 5 caracteres alfanuméricos.")
     return normalized
 
 
@@ -274,6 +312,207 @@ class ConsultaFotoRequest(BaseModel):
     @property
     def query_input(self) -> str:
         return self.cpf
+
+
+class ConsultaRGRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": {"rg": "234730742"}})
+
+    rg: str = Field(description="RG alfanumérico a ser consultado.")
+
+    @field_validator("rg")
+    @classmethod
+    def validate_rg(cls, value: str) -> str:
+        return _validate_rg(value)
+
+    @property
+    def query_input(self) -> str:
+        return self.rg
+
+
+class ConsultaPaiRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": {"nome": "Jose Silva"}})
+
+    nome: str = Field(description="Nome completo do pai a ser consultado.")
+
+    @field_validator("nome")
+    @classmethod
+    def validate_nome(cls, value: str) -> str:
+        return _validate_full_name(value)
+
+    @property
+    def query_input(self) -> str:
+        return self.nome
+
+
+class ConsultaPlacaRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": {"placa": "ABC1D23"}})
+
+    placa: str = Field(description="Placa no padrão antigo ou Mercosul.")
+
+    @field_validator("placa")
+    @classmethod
+    def validate_placa(cls, value: str) -> str:
+        return _validate_plate(value)
+
+    @property
+    def query_input(self) -> str:
+        return self.placa
+
+
+class ConsultaProprietarioRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": {"placa": "ABC1D23"}})
+
+    placa: str = Field(description="Placa usada na consulta de proprietário.")
+
+    @field_validator("placa")
+    @classmethod
+    def validate_placa(cls, value: str) -> str:
+        return _validate_plate(value)
+
+    @property
+    def query_input(self) -> str:
+        return self.placa
+
+
+class ConsultaCNSRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": {"cns": "705005484822659"}})
+
+    cns: str = Field(description="Número CNS com 15 dígitos.")
+
+    @field_validator("cns")
+    @classmethod
+    def validate_cns(cls, value: str) -> str:
+        digits_only = _normalize_digits(value)
+        if len(digits_only) != 15:
+            raise ValueError("CNS deve conter 15 dígitos.")
+        return digits_only
+
+    @property
+    def query_input(self) -> str:
+        return self.cns
+
+
+class ConsultaChaveRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": {"cpf": "07068093868"}})
+
+    cpf: str = Field(description="CPF com 11 dígitos usado na consulta de chave PIX.")
+
+    @field_validator("cpf")
+    @classmethod
+    def validate_cpf(cls, value: str) -> str:
+        digits_only = _normalize_digits(value)
+        if len(digits_only) != 11:
+            raise ValueError("CPF deve conter 11 dígitos.")
+        return digits_only
+
+    @property
+    def query_input(self) -> str:
+        return self.cpf
+
+
+class ConsultaVizinhosRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": {"cpf": "07068093868"}})
+
+    cpf: str = Field(description="CPF com 11 dígitos usado na consulta de vizinhos.")
+
+    @field_validator("cpf")
+    @classmethod
+    def validate_cpf(cls, value: str) -> str:
+        digits_only = _normalize_digits(value)
+        if len(digits_only) != 11:
+            raise ValueError("CPF deve conter 11 dígitos.")
+        return digits_only
+
+    @property
+    def query_input(self) -> str:
+        return self.cpf
+
+
+class ConsultaParentesRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": {"cpf": "07068093868"}})
+
+    cpf: str = Field(description="CPF com 11 dígitos usado na consulta de parentes.")
+
+    @field_validator("cpf")
+    @classmethod
+    def validate_cpf(cls, value: str) -> str:
+        digits_only = _normalize_digits(value)
+        if len(digits_only) != 11:
+            raise ValueError("CPF deve conter 11 dígitos.")
+        return digits_only
+
+    @property
+    def query_input(self) -> str:
+        return self.cpf
+
+
+class ConsultaPEPRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": {"cpf": "07068093868"}})
+
+    cpf: str = Field(description="CPF com 11 dígitos usado na consulta de PEP.")
+
+    @field_validator("cpf")
+    @classmethod
+    def validate_cpf(cls, value: str) -> str:
+        digits_only = _normalize_digits(value)
+        if len(digits_only) != 11:
+            raise ValueError("CPF deve conter 11 dígitos.")
+        return digits_only
+
+    @property
+    def query_input(self) -> str:
+        return self.cpf
+
+
+class ConsultaCondutorRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": {"cpf": "07068093868"}})
+
+    cpf: str = Field(description="CPF com 11 dígitos usado na consulta de condutor.")
+
+    @field_validator("cpf")
+    @classmethod
+    def validate_cpf(cls, value: str) -> str:
+        digits_only = _normalize_digits(value)
+        if len(digits_only) != 11:
+            raise ValueError("CPF deve conter 11 dígitos.")
+        return digits_only
+
+    @property
+    def query_input(self) -> str:
+        return self.cpf
+
+
+class ConsultaFrotaRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": {"cnpj": "33000167000101"}})
+
+    cnpj: str = Field(description="CNPJ com 14 dígitos usado na consulta de frota.")
+
+    @field_validator("cnpj")
+    @classmethod
+    def validate_cnpj(cls, value: str) -> str:
+        digits_only = _normalize_digits(value)
+        if len(digits_only) != 14:
+            raise ValueError("CNPJ deve conter 14 dígitos.")
+        return digits_only
+
+    @property
+    def query_input(self) -> str:
+        return self.cnpj
+
+
+class ConsultaProcessoNumeroRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": {"numero": "1234567"}})
+
+    numero: str = Field(description="Número do processo a ser consultado.")
+
+    @field_validator("numero")
+    @classmethod
+    def validate_numero(cls, value: str) -> str:
+        return _validate_process_number(value)
+
+    @property
+    def query_input(self) -> str:
+        return self.numero
 
 
 class ConsultaIPRequest(BaseModel):

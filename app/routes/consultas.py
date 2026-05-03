@@ -9,18 +9,30 @@ from app.models.requests import (
     ConsultationType,
     ConsultaBINRequest,
     ConsultaCEPRequest,
+    ConsultaChaveRequest,
     ConsultaCNPJRequest,
+    ConsultaCNSRequest,
+    ConsultaCondutorRequest,
     ConsultaCPFRequest,
     ConsultaEmailRequest,
     ConsultaEnderecoRequest,
     ConsultaFotoRequest,
+    ConsultaFrotaRequest,
     ConsultaGenericaRequest,
     ConsultaIPRequest,
     ConsultaMaeRequest,
     ConsultaNomeRequest,
+    ConsultaPaiRequest,
+    ConsultaParentesRequest,
+    ConsultaPEPRequest,
     ConsultaPIXRequest,
+    ConsultaPlacaRequest,
+    ConsultaProcessoNumeroRequest,
+    ConsultaProprietarioRequest,
+    ConsultaRGRequest,
     ConsultaTelefoneRequest,
     ConsultaTituloRequest,
+    ConsultaVizinhosRequest,
 )
 from app.models.responses import ConsultaResponse, ErrorResponse
 from app.services.account_pool import AccountPool
@@ -387,6 +399,78 @@ def _build_generic_execution_args(
             specific = ConsultaFotoRequest.model_validate({"cpf": payload.input})
             return payload.tipo, specific.query_input, None
 
+        if payload.tipo == "rg":
+            if payload.base is not None:
+                raise ValueError("Tipo de consulta 'rg' não aceita base.")
+            specific = ConsultaRGRequest.model_validate({"rg": payload.input})
+            return payload.tipo, specific.query_input, None
+
+        if payload.tipo == "pai":
+            if payload.base is not None:
+                raise ValueError("Tipo de consulta 'pai' não aceita base.")
+            specific = ConsultaPaiRequest.model_validate({"nome": payload.input})
+            return payload.tipo, specific.query_input, None
+
+        if payload.tipo == "placa":
+            if payload.base is not None:
+                raise ValueError("Tipo de consulta 'placa' não aceita base.")
+            specific = ConsultaPlacaRequest.model_validate({"placa": payload.input})
+            return payload.tipo, specific.query_input, None
+
+        if payload.tipo == "proprietario":
+            if payload.base is not None:
+                raise ValueError("Tipo de consulta 'proprietario' não aceita base.")
+            specific = ConsultaProprietarioRequest.model_validate({"placa": payload.input})
+            return payload.tipo, specific.query_input, None
+
+        if payload.tipo == "cns":
+            if payload.base is not None:
+                raise ValueError("Tipo de consulta 'cns' não aceita base.")
+            specific = ConsultaCNSRequest.model_validate({"cns": payload.input})
+            return payload.tipo, specific.query_input, None
+
+        if payload.tipo == "chave":
+            if payload.base is not None:
+                raise ValueError("Tipo de consulta 'chave' não aceita base.")
+            specific = ConsultaChaveRequest.model_validate({"cpf": payload.input})
+            return payload.tipo, specific.query_input, None
+
+        if payload.tipo == "vizinhos":
+            if payload.base is not None:
+                raise ValueError("Tipo de consulta 'vizinhos' não aceita base.")
+            specific = ConsultaVizinhosRequest.model_validate({"cpf": payload.input})
+            return payload.tipo, specific.query_input, None
+
+        if payload.tipo == "parentes":
+            if payload.base is not None:
+                raise ValueError("Tipo de consulta 'parentes' não aceita base.")
+            specific = ConsultaParentesRequest.model_validate({"cpf": payload.input})
+            return payload.tipo, specific.query_input, None
+
+        if payload.tipo == "pep":
+            if payload.base is not None:
+                raise ValueError("Tipo de consulta 'pep' não aceita base.")
+            specific = ConsultaPEPRequest.model_validate({"cpf": payload.input})
+            return payload.tipo, specific.query_input, None
+
+        if payload.tipo == "condutor":
+            if payload.base is not None:
+                raise ValueError("Tipo de consulta 'condutor' não aceita base.")
+            specific = ConsultaCondutorRequest.model_validate({"cpf": payload.input})
+            return payload.tipo, specific.query_input, None
+
+        if payload.tipo == "frota":
+            if payload.base is not None:
+                raise ValueError("Tipo de consulta 'frota' não aceita base.")
+            specific = ConsultaFrotaRequest.model_validate({"cnpj": payload.input})
+            return payload.tipo, specific.query_input, None
+
+        if payload.tipo == "processo_numero":
+            if payload.base is not None:
+                raise ValueError("Tipo de consulta 'processo_numero' não aceita base.")
+            specific = ConsultaProcessoNumeroRequest.model_validate({"numero": payload.input})
+            return payload.tipo, specific.query_input, None
+
         if payload.tipo == "ip":
             if payload.base is not None:
                 raise ValueError("Tipo de consulta 'ip' não aceita base.")
@@ -635,7 +719,7 @@ async def consulta_endereco(
     "/mae",
     response_model=ConsultaResponse,
     summary="Consultar nome da mãe",
-    description="Consulta nome da mãe usando o DataFlow nesta fase.",
+    description="Consulta nome da mãe com preferência pelo Work Bot e fallback para o DataFlow.",
     responses=COMMON_ERROR_RESPONSES,
 )
 async def consulta_mae(
@@ -661,7 +745,7 @@ async def consulta_mae(
     "/foto",
     response_model=ConsultaResponse,
     summary="Consultar foto",
-    description="Consulta foto pelo DataFlow. Quando o bot retornar mídia diretamente, o payload indicará isso em `data`.",
+    description="Consulta foto com preferência pelo Work Bot e fallback para o DataFlow. Quando o bot retornar mídia diretamente, o payload indicará isso em `data`.",
     responses=COMMON_ERROR_RESPONSES,
 )
 async def consulta_foto(
@@ -679,6 +763,318 @@ async def consulta_foto(
         runtime_state=runtime_state,
         bot_router=bot_router,
         tipo="foto",
+        query_input=payload.query_input,
+    )
+
+
+@router.post(
+    "/rg",
+    response_model=ConsultaResponse,
+    summary="Consultar RG",
+    description="Consulta RG usando o Work Bot nesta fase.",
+    responses=COMMON_ERROR_RESPONSES,
+)
+async def consulta_rg(
+    response: Response,
+    payload: ConsultaRGRequest,
+    pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
+    runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
+):
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo="rg",
+        query_input=payload.query_input,
+    )
+
+
+@router.post(
+    "/pai",
+    response_model=ConsultaResponse,
+    summary="Consultar nome do pai",
+    description="Consulta nome do pai usando o Work Bot nesta fase.",
+    responses=COMMON_ERROR_RESPONSES,
+)
+async def consulta_pai(
+    response: Response,
+    payload: ConsultaPaiRequest,
+    pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
+    runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
+):
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo="pai",
+        query_input=payload.query_input,
+    )
+
+
+@router.post(
+    "/placa",
+    response_model=ConsultaResponse,
+    summary="Consultar placa",
+    description="Consulta placa usando o Work Bot, com resolução automática de captcha quando necessário.",
+    responses=COMMON_ERROR_RESPONSES,
+)
+async def consulta_placa(
+    response: Response,
+    payload: ConsultaPlacaRequest,
+    pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
+    runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
+):
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo="placa",
+        query_input=payload.query_input,
+    )
+
+
+@router.post(
+    "/proprietario",
+    response_model=ConsultaResponse,
+    summary="Consultar proprietário por placa",
+    description="Consulta proprietário por placa usando o Work Bot.",
+    responses=COMMON_ERROR_RESPONSES,
+)
+async def consulta_proprietario(
+    response: Response,
+    payload: ConsultaProprietarioRequest,
+    pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
+    runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
+):
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo="proprietario",
+        query_input=payload.query_input,
+    )
+
+
+@router.post(
+    "/cns",
+    response_model=ConsultaResponse,
+    summary="Consultar CNS",
+    description="Consulta CNS usando o Work Bot.",
+    responses=COMMON_ERROR_RESPONSES,
+)
+async def consulta_cns(
+    response: Response,
+    payload: ConsultaCNSRequest,
+    pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
+    runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
+):
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo="cns",
+        query_input=payload.query_input,
+    )
+
+
+@router.post(
+    "/chave",
+    response_model=ConsultaResponse,
+    summary="Consultar chave PIX",
+    description="Consulta chave PIX usando o Work Bot.",
+    responses=COMMON_ERROR_RESPONSES,
+)
+async def consulta_chave(
+    response: Response,
+    payload: ConsultaChaveRequest,
+    pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
+    runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
+):
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo="chave",
+        query_input=payload.query_input,
+    )
+
+
+@router.post(
+    "/vizinhos",
+    response_model=ConsultaResponse,
+    summary="Consultar vizinhos",
+    description="Consulta vizinhos usando o Work Bot nesta fase.",
+    responses=COMMON_ERROR_RESPONSES,
+)
+async def consulta_vizinhos(
+    response: Response,
+    payload: ConsultaVizinhosRequest,
+    pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
+    runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
+):
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo="vizinhos",
+        query_input=payload.query_input,
+    )
+
+
+@router.post(
+    "/parentes",
+    response_model=ConsultaResponse,
+    summary="Consultar parentes",
+    description="Consulta parentes usando o Work Bot nesta fase.",
+    responses=COMMON_ERROR_RESPONSES,
+)
+async def consulta_parentes(
+    response: Response,
+    payload: ConsultaParentesRequest,
+    pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
+    runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
+):
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo="parentes",
+        query_input=payload.query_input,
+    )
+
+
+@router.post(
+    "/pep",
+    response_model=ConsultaResponse,
+    summary="Consultar PEP",
+    description="Consulta PEP usando o Work Bot nesta fase.",
+    responses=COMMON_ERROR_RESPONSES,
+)
+async def consulta_pep(
+    response: Response,
+    payload: ConsultaPEPRequest,
+    pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
+    runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
+):
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo="pep",
+        query_input=payload.query_input,
+    )
+
+
+@router.post(
+    "/condutor",
+    response_model=ConsultaResponse,
+    summary="Consultar condutor",
+    description="Consulta condutor usando o Work Bot nesta fase.",
+    responses=COMMON_ERROR_RESPONSES,
+)
+async def consulta_condutor(
+    response: Response,
+    payload: ConsultaCondutorRequest,
+    pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
+    runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
+):
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo="condutor",
+        query_input=payload.query_input,
+    )
+
+
+@router.post(
+    "/frota",
+    response_model=ConsultaResponse,
+    summary="Consultar frota",
+    description="Consulta frota usando o Work Bot nesta fase.",
+    responses=COMMON_ERROR_RESPONSES,
+)
+async def consulta_frota(
+    response: Response,
+    payload: ConsultaFrotaRequest,
+    pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
+    runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
+):
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo="frota",
+        query_input=payload.query_input,
+    )
+
+
+@router.post(
+    "/processo",
+    response_model=ConsultaResponse,
+    summary="Consultar processo",
+    description="Consulta número de processo usando o Work Bot nesta fase.",
+    responses=COMMON_ERROR_RESPONSES,
+)
+async def consulta_processo(
+    response: Response,
+    payload: ConsultaProcessoNumeroRequest,
+    pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
+    runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
+):
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo="processo_numero",
         query_input=payload.query_input,
     )
 

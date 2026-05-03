@@ -26,6 +26,11 @@ class BotResponseError(ValueError):
         return int(self.STATUS_MAP[self.error_code])
 
 
+class PaidOnlyError(BotResponseError):
+    def __init__(self, message: str = "Base requer assinatura"):
+        super().__init__("subscription", message)
+
+
 class AllBotsFailedError(RuntimeError):
     def __init__(
         self,
@@ -109,7 +114,7 @@ class BotAdapter(ABC):
         normalized = cls._normalize_text(text)
 
         if "assinatura ativa" in normalized or "planos privados" in normalized:
-            raise BotResponseError("subscription", "Base requer assinatura")
+            raise PaidOnlyError("Base requer assinatura")
         if "manutencao" in normalized:
             raise BotResponseError("maintenance", "Em manutenção")
         if "invalido" in normalized:

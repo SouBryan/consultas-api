@@ -8,24 +8,37 @@ from app.services.adapters import (
     BotAdapter,
     BotResponseError,
     DataFlowAdapter,
+    WorkBotAdapter,
 )
 from app.services.bot_health import BotHealth
 from app.utils.logger import get_logger
 
 
 FALLBACK_CHAINS = {
-    "cpf": ["dataflow", "black_consultas"],
-    "nome": ["dataflow", "black_consultas"],
-    "telefone": ["dataflow", "black_consultas"],
-    "email": ["dataflow", "black_consultas"],
-    "cep": ["dataflow", "black_consultas"],
-    "cnpj": ["dataflow"],
-    "titulo": ["dataflow"],
+    "cpf": ["dataflow", "work_bot", "black_consultas"],
+    "nome": ["dataflow", "work_bot", "black_consultas"],
+    "telefone": ["dataflow", "work_bot", "black_consultas"],
+    "email": ["dataflow", "work_bot", "black_consultas"],
+    "cep": ["dataflow", "work_bot", "black_consultas"],
+    "cnpj": ["dataflow", "work_bot"],
+    "titulo": ["dataflow", "work_bot"],
     "bin": ["dataflow"],
     "endereco": ["dataflow"],
-    "mae": ["dataflow"],
-    "foto": ["dataflow"],
+    "mae": ["work_bot", "dataflow"],
+    "foto": ["work_bot", "dataflow"],
     "ip": ["black_consultas"],
+    "rg": ["work_bot"],
+    "pai": ["work_bot"],
+    "placa": ["work_bot"],
+    "proprietario": ["work_bot"],
+    "cns": ["work_bot"],
+    "chave": ["work_bot"],
+    "vizinhos": ["work_bot"],
+    "parentes": ["work_bot"],
+    "pep": ["work_bot"],
+    "condutor": ["work_bot"],
+    "frota": ["work_bot"],
+    "processo_numero": ["work_bot"],
     "pix": ["black_consultas"],
 }
 
@@ -38,6 +51,7 @@ class BotRouter:
     ):
         self._adapters = adapters or {
             "dataflow": DataFlowAdapter(),
+            "work_bot": WorkBotAdapter(),
             "black_consultas": BlackConsultasAdapter(),
         }
         self._health_tracker = health_tracker or BotHealth()
