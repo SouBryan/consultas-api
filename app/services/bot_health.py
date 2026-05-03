@@ -21,6 +21,9 @@ class AdapterHealthState:
     circuit_state: str = "closed"
     trial_in_progress: bool = False
     last_state_change: float | None = None
+    total_queries: int = 0
+    total_successes: int = 0
+    total_failures: int = 0
 
 
 class BotHealth:
@@ -92,6 +95,8 @@ class BotHealth:
         with self._lock:
             state = self._ensure_state_locked(adapter_name)
             self._refresh_state_locked(adapter_name, state)
+            state.total_queries += 1
+            state.total_successes += 1
             state.history.append(True)
             state.response_times.append(max(0.0, response_time_seconds))
             state.last_success = time.time()
@@ -117,6 +122,8 @@ class BotHealth:
         with self._lock:
             state = self._ensure_state_locked(adapter_name)
             self._refresh_state_locked(adapter_name, state)
+            state.total_queries += 1
+            state.total_failures += 1
             state.history.append(False)
             if response_time_seconds is not None:
                 state.response_times.append(max(0.0, response_time_seconds))
@@ -168,6 +175,21 @@ class BotHealth:
                 self._refresh_state_locked(adapter_name, state)
                 statuses[adapter_name] = self._serialize_state_locked(adapter_name, state)
             return statuses
+
+    def get_metrics(self, adapter_names: list[str]) -> dict[str, dict[str, Any]]:
+        with self._lock:
+            metrics: dict[str, dict[str, Any]] = {}
+            for adapter_name in adapter_names:
+                state = self._ensure_state_locked(adapter_name)
+                self._refresh_state_locked(adapter_name, state)
+                avg_time_seconds = self._calculate_avg_time_locked(state)
+                metrics[adapter_name] = {
+                    "queries": state.total_queries,
+                    "successes": state.total_successes,
+                    "failures": state.total_failures,
+                    "avg_time_ms": None if avg_time_seconds is None else round(avg_time_seconds * 1000, 2),
+                }
+            return metrics
 
     def _ensure_state_locked(self, adapter_name: str) -> AdapterHealthState:
         state = self._states.get(adapter_name)
@@ -284,10 +306,14 @@ class BotHealth:
             "healthy": state.healthy and state.circuit_state != "open" and not state.trial_in_progress,
             "success_rate": round(self._calculate_success_rate_locked(state), 4),
             "avg_time_seconds": None if avg_time_seconds is None else round(avg_time_seconds, 3),
+            "avg_time_ms": None if avg_time_seconds is None else round(avg_time_seconds * 1000, 2),
             "avg_time": None if avg_time_seconds is None else f"{avg_time_seconds:.1f}s",
             "last_success": self._relative_time(state.last_success),
             "last_success_at": self._to_isoformat(state.last_success),
             "last_failure_at": self._to_isoformat(state.last_failure),
+            "queries": state.total_queries,
+            "successes": state.total_successes,
+            "failures": state.total_failures,
             "consecutive_failures": state.consecutive_failures,
             "circuit_state": state.circuit_state,
             "reason": state.reason,

@@ -1,75 +1,60 @@
-# Consultas API
+# Consultas API V2 - Multi-Bot
 
 ![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white)
 ![Docker](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)
 ![License MIT](https://img.shields.io/badge/license-MIT-green)
 
-API REST self-hosted em FastAPI para automatizar consultas em um serviço de consultas via Telegram e devolver o resultado em JSON estruturado.
+API REST self-hosted em FastAPI para executar consultas via múltiplos bots Telegram, com fallback automático, autenticação por API key, cache em memória, métricas operacionais e empacotamento para produção.
 
-O projeto encapsula o fluxo completo de automação: recebe a requisição HTTP, valida o payload, aplica autenticação e rate limiting, escolhe uma conta Telegram disponível, executa a consulta no serviço upstream, busca o resultado e devolve uma resposta pronta para integração com outros sistemas.
+O fluxo principal é:
 
-Cada usuário hospeda a sua própria instância, configura as suas próprias credenciais e opera a API no ambiente que preferir.
+1. Receber a requisição HTTP.
+2. Validar a API key e aplicar rate limit por chave.
+3. Verificar cache em memória.
+4. Escolher uma conta Telegram disponível.
+5. Percorrer a chain de adapters do tipo solicitado.
+6. Retornar o primeiro resultado bem-sucedido em JSON.
 
 ## Principais recursos
 
-- API HTTP com FastAPI e documentação OpenAPI automática em `/docs`.
-- Automação de consultas via Telethon usando duas contas Telegram em round-robin.
-- Retry automático em outra conta quando a primeira tentativa falha por timeout.
-- Cache em memória com TTL configurável e header `X-Cache`.
-- Rate limiting por IP na camada HTTP e por conta na camada Telegram.
-- Logs estruturados em JSON para stdout.
-- Empacotamento com Docker e `docker compose`.
-- Endpoints de health check e status operacional.
+- 6 adapters Telegram com chains de fallback por tipo.
+- 2 contas Telegram operando em pool com controle de concorrência.
+- Rate limit por API key e rate limit interno por conta e por grupo.
+- Cache em memória com suporte a stale fallback.
+- Health tracking, success rate, cooldown e circuit breaker por adapter.
+- Captcha solver via VoidAI para fluxos do Work Bot.
+- OpenAPI/Swagger com documentação por endpoint e esquema X-API-Key.
+- Docker multi-stage com usuário não-root e worker único para compatibilidade com Telethon.
+- Graceful shutdown com espera de consultas em andamento e flush de métricas no log.
 
 ## Arquitetura
 
 ```mermaid
 flowchart LR
     A[Cliente HTTP] --> B[FastAPI]
-    B --> C[Middleware<br/>X-API-Key + rate limit por IP]
+    B --> C[Middleware de Auth<br/>X-API-Key + rate limit]
     C --> D{Cache em memoria}
     D -- HIT --> E[Resposta JSON]
-    D -- MISS --> F[AccountPool<br/>2 contas + lock + delay]
-    F --> G[Telethon]
-    G --> H[Servico de consultas via Telegram]
-    H --> I[Link de resultado]
-    I --> J[Scraper<br/>httpx + parse]
-    J --> K[JSON estruturado]
-    K --> L[Armazenamento no cache]
+    D -- MISS --> F[AccountPool<br/>bryan / bryan2]
+    F --> G[BotRouter]
+    G --> H[Adapters Telegram<br/>DataFlow, Work Bot, Unix, etc.]
+    H --> I[Resultado privado, inline ou link]
+    I --> J[Parser / Scraper]
+    J --> K[Payload JSON estruturado]
+    K --> L[Armazenamento em cache]
     L --> E
 ```
 
-Fluxo resumido:
-
-1. O cliente envia uma requisição para `http://localhost:8000`.
-2. A API valida a `X-API-Key`, aplica o limite por IP e verifica o cache.
-3. Em caso de `MISS`, o `AccountPool` escolhe uma conta Telegram livre e respeita o delay mínimo por conta.
-4. O worker envia o comando, seleciona a sub-base quando necessário e aguarda o link de resultado.
-5. O scraper tenta obter os dados estruturados e converte o retorno em JSON.
-6. A resposta é enviada ao cliente com `X-Cache: MISS` e fica disponível no cache por até `CACHE_TTL_HOURS`.
-
-## Stack tecnológica
-
-| Componente | Tecnologia | Papel no projeto |
-| --- | --- | --- |
-| API HTTP | FastAPI | Rotas, serialização, OpenAPI e ciclo de vida da aplicação |
-| Cliente Telegram | Telethon | Envio de comandos, clique em botões inline e espera por eventos |
-| HTTP client | httpx | Busca do resultado retornado pelo serviço Telegram |
-| Validação e settings | Pydantic v2 + pydantic-settings | Schemas de request/response e leitura do `.env` |
-| Parser | selectolax | Fallback para extração de HTML quando necessário |
-| Logs | python-json-logger | Saída estruturada em JSON |
-| Containerização | Docker + Docker Compose | Empacotamento e execução self-hosted |
-
 ## Requisitos
 
-- Python 3.12 é o ambiente de referência do projeto e da imagem Docker.
-- O pacote declara compatibilidade com Python 3.11+, mas a documentação e os exemplos assumem Python 3.12.
-- Duas `StringSession` válidas para as contas Telegram configuradas no `.env`.
-- Acesso ao grupo onde o serviço de consultas responde.
-- Docker e Docker Compose são opcionais.
+- Python 3.12+.
+- Duas StringSession válidas para Telegram.
+- Acesso aos grupos usados pelos bots.
+- Chave da VoidAI para captcha do Work Bot.
+- Docker e Docker Compose são opcionais, mas recomendados para produção.
 
-## Instalação local
+## Setup local
 
 1. Crie e ative um ambiente virtual.
 
@@ -90,185 +75,116 @@ No Windows PowerShell:
 pip install -r requirements.txt
 ```
 
-3. Copie o arquivo de exemplo de ambiente.
+3. Copie o template de ambiente.
 
 ```bash
 cp .env.example .env
 ```
 
-4. Gere uma API key forte.
+4. Preencha o arquivo .env com as credenciais Telegram, grupos, chaves da API e VoidAI.
+
+5. Suba a API.
 
 ```bash
-python -c "import secrets; print(secrets.token_urlsafe(32))"
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 --reload
 ```
 
-5. Preencha o `.env` com as credenciais Telegram, sessions e a chave gerada.
-
-6. Inicie a API.
-
-```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-7. Verifique se o serviço subiu corretamente.
+6. Verifique a saúde do serviço.
 
 ```bash
 curl http://localhost:8000/api/health
 ```
 
-8. Opcionalmente, rode o teste manual do MVP.
+## Docker
+
+Build e subida local:
 
 ```bash
-python test_manual.py
+docker compose up -d --build
 ```
 
-Endpoints úteis em desenvolvimento:
-
-- `http://localhost:8000/docs`
-- `http://localhost:8000/redoc`
-- `http://localhost:8000/api/health`
-
-## Instalação com Docker
-
-1. Crie e preencha o `.env` na raiz do projeto.
-2. Suba o container.
+Logs:
 
 ```bash
-docker compose up --build -d
+docker compose logs -f consultas-api
 ```
 
-3. Acompanhe os logs.
-
-```bash
-docker compose logs -f api
-```
-
-4. Faça um health check local.
+Health check:
 
 ```bash
 curl http://localhost:8000/api/health
 ```
 
-Observações sobre Docker:
+Notas de produção:
 
-- O container expõe a porta `8000` internamente.
-- O `docker-compose.yml` publica `8000:8000` por padrão.
-- O health check interno usa `curl http://localhost:8000/api/health`.
+- O container expõe a porta 8000.
+- O processo usa uvicorn com --workers 1.
+- O compose usa logging json-file com rotação.
+- O graceful shutdown respeita stop_grace_period de 35 segundos.
 
 ## Variáveis de ambiente
 
-Todas as variáveis disponíveis em `app/config.py` estão documentadas em `.env.example`.
+O arquivo completo está em .env.example. As principais variáveis são:
 
-| Variável | Obrigatória | Padrão | Descrição |
-| --- | --- | --- | --- |
-| `TELEGRAM_API_ID` | Sim | - | API ID da aplicação Telegram |
-| `TELEGRAM_API_HASH` | Sim | - | API hash da aplicação Telegram |
-| `TELEGRAM_SESSION_STRING_BRYAN` | Sim | - | `StringSession` da primeira conta Telegram |
-| `TELEGRAM_SESSION_STRING_BRYAN2` | Sim | - | `StringSession` da segunda conta Telegram |
-| `TELEGRAM_GROUP_ID` | Sim | - | ID numérico do grupo onde o serviço responde |
-| `TELEGRAM_TIMEOUT` | Não | `15` | Timeout de espera pelas respostas do serviço Telegram |
-| `RATE_LIMIT_INTERVAL` | Não | `3.0` | Intervalo mínimo entre consultas da mesma conta |
-| `MAX_REQUESTS_PER_MINUTE` | Não | `20` | Limite por IP em janela de 60 segundos |
-| `CACHE_TTL_HOURS` | Não | `24` | TTL do cache em memória, em horas |
-| `API_SECRET_KEY` | Recomendado | `""` | Chave principal aceita nos endpoints protegidos |
-| `API_KEYS` | Não | `""` | Chaves adicionais separadas por vírgula |
-| `API_HOST` | Não | `0.0.0.0` | Valor de referência para sua operação local/infra |
-| `API_PORT` | Não | `8000` | Valor de referência para sua operação local/infra |
-| `CORS_ORIGINS` | Não | `*` | Lista de origens permitidas, separadas por vírgula |
+| Variável | Obrigatória | Descrição |
+| --- | --- | --- |
+| TELEGRAM_API_ID | Sim | API ID da aplicação Telegram |
+| TELEGRAM_API_HASH | Sim | API hash da aplicação Telegram |
+| TELEGRAM_SESSION_STRING_BRYAN | Sim | StringSession da primeira conta |
+| TELEGRAM_SESSION_STRING_BRYAN2 | Sim | StringSession da segunda conta |
+| GROUP_BLACK_CONSULTAS | Sim | Grupo do Black Consultas |
+| GROUP_DATAFLOW | Sim | Grupo do DataFlow |
+| GROUP_DON | Sim | Grupo DON |
+| GROUP_TAMAKI | Sim | Grupo TAMAKI |
+| GROUP_UNEN | Sim | Grupo UNEN |
+| VOIDAI_API_KEY | Sim para /placa via Work Bot | API key da VoidAI |
+| VOIDAI_MODEL | Não | Modelo do solver de captcha. Padrão: gemini-2.0-flash |
+| API_KEYS | Sim em produção | Lista de chaves separadas por vírgula |
+| API_SECRET_KEY | Não | Alias legado para chave única |
+| CORS_ORIGINS | Não | Origens permitidas separadas por vírgula |
+| CACHE_TTL_HOURS | Não | TTL do cache em horas |
+| RATE_LIMIT_INTERVAL | Não | Delay mínimo entre consultas na mesma conta |
+| MAX_REQUESTS_PER_MINUTE | Não | Rate limit por API key em janela de 60 segundos |
+| TELEGRAM_TIMEOUT | Não | Timeout por etapa de interação com bots |
 
-Exemplo mínimo:
+## Autenticação e rate limit
 
-```env
-TELEGRAM_API_ID=12345678
-TELEGRAM_API_HASH=seu_telegram_api_hash
-TELEGRAM_SESSION_STRING_BRYAN=sua_string_session_bryan
-TELEGRAM_SESSION_STRING_BRYAN2=sua_string_session_bryan2
-TELEGRAM_GROUP_ID=-1002396715550
-TELEGRAM_TIMEOUT=15
-RATE_LIMIT_INTERVAL=3.0
-MAX_REQUESTS_PER_MINUTE=20
-CACHE_TTL_HOURS=24
-API_SECRET_KEY=sua-api-key-aqui
-API_KEYS=
-CORS_ORIGINS=*
-```
-
-## Autenticação
-
-A autenticação é feita via header `X-API-Key`.
-
-Regras atuais:
-
-- Todos os endpoints em `/api/*`, exceto `/api/health`, exigem `X-API-Key`.
-- A API aceita a chave principal definida em `API_SECRET_KEY`.
-- A API também aceita chaves extras informadas em `API_KEYS`, separadas por vírgula.
-- Se nenhuma chave estiver configurada no servidor, os endpoints protegidos retornam `503 Service Unavailable`.
-- Se a chave estiver ausente ou incorreta, a API retorna `401 Unauthorized`.
+- Endpoints públicos: /api/health, /api/metrics, /docs, /redoc e /openapi.json.
+- Todos os outros endpoints exigem o header X-API-Key.
+- O limite padrão é por API key, não por IP.
+- Se nenhuma key estiver configurada, endpoints protegidos retornam 503.
 
 Exemplo:
 
 ```bash
 curl http://localhost:8000/api/status \
-  -H "X-API-Key: sua-api-key-aqui"
+  -H "X-API-Key: change-me-key1"
 ```
 
-## Rate limiting e concorrência
+Para adicionar uma nova API key:
 
-### Limite por IP
+1. Edite API_KEYS no .env, separando por vírgula.
+2. Reinicie a aplicação ou o container.
 
-- Aplicado a todos os endpoints `/api/*`, exceto `/api/health`.
-- Usa `MAX_REQUESTS_PER_MINUTE` em uma janela deslizante de 60 segundos.
-- Ao exceder o limite, a API retorna `429 Too Many Requests` com o header `Retry-After`.
+Exemplo:
 
-### Limite por conta Telegram
+```env
+API_KEYS=change-me-key1,change-me-key2,nova-chave-de-producao
+```
 
-- Cada conta respeita `RATE_LIMIT_INTERVAL` segundos entre consultas consecutivas.
-- O delay é aplicado no momento em que a conta é adquirida pelo `AccountPool`.
-- O pool mantém um lock por conta, então existe no máximo uma consulta ativa por conta.
+## Sistema de fallback
 
-### Concorrência efetiva
+Cada tipo de consulta possui uma chain fixa de adapters. O router tenta o adapter principal e, em caso de timeout, erro de negócio, indisponibilidade ou circuito aberto, segue para o próximo adapter saudável.
 
-- Com duas contas configuradas, a API processa até duas consultas simultâneas no upstream Telegram.
-- Se uma conta der timeout, a API tenta novamente usando outra conta disponível.
-- O retry automático ocorre apenas para timeout. Erros de negócio do serviço Telegram são retornados imediatamente.
+Exemplos de prioridade:
 
-## Cache
+- cpf: dataflow -> work_bot -> unknowrealbot -> voidsearch -> black_consultas
+- cep: unix_robot -> dataflow -> work_bot -> voidsearch -> black_consultas
+- placa: work_bot -> unknowrealbot -> voidsearch
 
-O cache é implementado em memória por processo.
+Com duas contas Telegram livres, o router também pode acionar failover paralelo para reduzir latência.
 
-Comportamento atual:
-
-- A chave do cache é um `sha256(command::base)`.
-- O TTL é controlado por `CACHE_TTL_HOURS`.
-- A resposta inclui `X-Cache: HIT` quando servida do cache.
-- A resposta inclui `X-Cache: MISS` quando a consulta precisou passar pelo fluxo Telegram + scraper.
-- Reiniciar a API limpa todo o cache.
-- O cache não é compartilhado entre múltiplas instâncias.
-
-## Headers de resposta úteis
-
-| Header | Quando aparece | Significado |
-| --- | --- | --- |
-| `X-Cache` | Endpoints de consulta | `HIT` para cache, `MISS` para processamento completo |
-| `Retry-After` | Respostas `429` | Segundos recomendados antes de tentar novamente |
-
-## Endpoints
-
-Observação importante: o envelope de sucesso é sempre o mesmo, mas o conteúdo de `data` varia conforme o tipo de consulta e conforme o retorno do serviço upstream.
-
-| Método | Rota | Auth | Descrição |
-| --- | --- | --- | --- |
-| `GET` | `/api/health` | Não | Health check básico |
-| `GET` | `/api/status` | Sim | Estado das contas, cache, uptime e último erro |
-| `POST` | `/api/consulta/cpf` | Sim | Consulta CPF com sub-bases gratuitas |
-| `POST` | `/api/consulta/nome` | Sim | Consulta por nome completo |
-| `POST` | `/api/consulta/telefone` | Sim | Consulta por telefone com DDD |
-| `POST` | `/api/consulta/cep` | Sim | Consulta CEP sem sub-base |
-| `POST` | `/api/consulta/email` | Sim | Consulta por e-mail |
-| `POST` | `/api/consulta/ip` | Sim | Consulta por IPv4 |
-| `POST` | `/api/consulta/titulo` | Sim | Consulta título de eleitor |
-| `POST` | `/api/consulta/pix` | Sim | Consulta PIX na base padrão `pix` |
-| `POST` | `/api/consulta` | Sim | Endpoint genérico para roteamento por `tipo` |
+## Endpoints de sistema
 
 ### GET /api/health
 
@@ -276,269 +192,422 @@ Observação importante: o envelope de sucesso é sempre o mesmo, mas o conteúd
 curl http://localhost:8000/api/health
 ```
 
-```json
-{
-  "status": "ok",
-  "accounts": 2,
-  "uptime": 125.381
-}
+### GET /api/metrics
+
+```bash
+curl http://localhost:8000/api/metrics
 ```
 
 ### GET /api/status
 
 ```bash
 curl http://localhost:8000/api/status \
-  -H "X-API-Key: sua-api-key-aqui"
+  -H "X-API-Key: change-me-key1"
 ```
+
+### GET /api/status/bots
+
+```bash
+curl http://localhost:8000/api/status/bots \
+  -H "X-API-Key: change-me-key1"
+```
+
+### GET /api/debug/chain/{tipo}
+
+```bash
+curl "http://localhost:8000/api/debug/chain/cpf" \
+  -H "X-API-Key: change-me-key1"
+```
+
+### GET /api/debug/last-errors
+
+```bash
+curl http://localhost:8000/api/debug/last-errors \
+  -H "X-API-Key: change-me-key1"
+```
+
+### DELETE /api/cache/{tipo}/{input}
+
+```bash
+curl -X DELETE "http://localhost:8000/api/cache/cpf/12974572936?base=completo" \
+  -H "X-API-Key: change-me-key1"
+```
+
+## Catálogo de consultas
+
+Os exemplos abaixo usam http://localhost:8000 e a API key change-me-key1. O envelope de sucesso é sempre:
 
 ```json
 {
-  "accounts": [
-    {"label": "bryan", "status": "connected"},
-    {"label": "bryan2", "status": "connected"}
-  ],
-  "cache_size": 3,
-  "uptime": 532.204,
-  "queries_today": 27,
-  "last_error": {
-    "timestamp": "2026-05-02T18:00:00+00:00",
-    "type": "subscription",
-    "message": "Base requer assinatura",
-    "context": {
-      "tipo": "pix",
-      "account": "bryan"
-    }
-  }
+  "status": "success",
+  "link": "",
+  "data": {}
 }
 ```
 
-### POST /api/consulta/cpf
+### Pessoa
 
-Bases aceitas: `completo`, `fotos`, `vizinhos`, `empregos`, `vacinas`, `beneficios`, `internet`, `obito`, `compras`.
+#### POST /api/consulta/cpf
+
+Chain: dataflow -> work_bot -> unknowrealbot -> voidsearch -> black_consultas
 
 ```bash
 curl -X POST http://localhost:8000/api/consulta/cpf \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: sua-api-key-aqui" \
+  -H "X-API-Key: change-me-key1" \
   -d '{"cpf":"12974572936","base":"completo"}'
 ```
 
-```json
-{
-  "status": "success",
-  "link": "https://resultado-exemplo.invalid/result-consultation/cpf_abc123?bot=",
-  "data": {
-    "dados_basicos": {
-      "nome": "LORENZO CRISTIANINI DE OLIVEIRA",
-      "cpf": "12974572936",
-      "data_nascimento": "07/01/2010",
-      "situacao_cadastral": "REGULAR"
-    },
-    "enderecos": [
-      {
-        "logradouro": "PENHA, 127",
-        "bairro": "ATLANTICO II",
-        "cidade_uf": "CIANORTE/PR",
-        "cep": "87202040"
-      }
-    ]
-  }
-}
-```
+#### POST /api/consulta/nome
 
-### POST /api/consulta/nome
-
-Bases aceitas: `nome`, `nome_mae`.
+Chain: dataflow -> work_bot -> unix_robot -> voidsearch -> black_consultas
 
 ```bash
 curl -X POST http://localhost:8000/api/consulta/nome \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: sua-api-key-aqui" \
+  -H "X-API-Key: change-me-key1" \
   -d '{"nome":"João da Silva Santos","base":"nome"}'
 ```
 
-```json
-{
-  "status": "success",
-  "link": "https://resultado-exemplo.invalid/result-consultation/nome_abc123?bot=",
-  "data": {
-    "dados_basicos": {
-      "nome": "JOAO DA SILVA SANTOS",
-      "cpf": "12974572936",
-      "data_nascimento": "07/01/2010"
-    }
-  }
-}
-```
+#### POST /api/consulta/telefone
 
-### POST /api/consulta/telefone
+Chain: dataflow -> work_bot -> unknowrealbot -> voidsearch -> black_consultas
 
 ```bash
 curl -X POST http://localhost:8000/api/consulta/telefone \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: sua-api-key-aqui" \
+  -H "X-API-Key: change-me-key1" \
   -d '{"telefone":"44988030666","base":"telefone"}'
 ```
 
-```json
-{
-  "status": "success",
-  "link": "https://resultado-exemplo.invalid/result-consultation/tel_abc123?bot=",
-  "data": {
-    "dados_basicos": {
-      "telefone": "44988030666",
-      "nome": "JOAO DA SILVA",
-      "cidade_uf": "CIANORTE/PR"
-    }
-  }
-}
-```
+#### POST /api/consulta/email
 
-### POST /api/consulta/cep
-
-```bash
-curl -X POST http://localhost:8000/api/consulta/cep \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: sua-api-key-aqui" \
-  -d '{"cep":"87020025"}'
-```
-
-```json
-{
-  "status": "success",
-  "link": "https://resultado-exemplo.invalid/result-consultation/cep_abc123?bot=",
-  "data": {
-    "dados_basicos": {
-      "cep": "87020025",
-      "logradouro": "AVENIDA BRASIL",
-      "bairro": "CENTRO",
-      "cidade_uf": "MARINGA/PR"
-    }
-  }
-}
-```
-
-### POST /api/consulta/email
+Chain: dataflow -> work_bot -> unknowrealbot -> black_consultas
 
 ```bash
 curl -X POST http://localhost:8000/api/consulta/email \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: sua-api-key-aqui" \
+  -H "X-API-Key: change-me-key1" \
   -d '{"email":"joao@gmail.com","base":"email"}'
 ```
 
-```json
-{
-  "status": "success",
-  "link": "https://resultado-exemplo.invalid/result-consultation/email_abc123?bot=",
-  "data": {
-    "dados_basicos": {
-      "email": "joao@gmail.com",
-      "nome": "JOAO DA SILVA",
-      "cidade_uf": "CIANORTE/PR"
-    }
-  }
-}
-```
+#### POST /api/consulta/cnpj
 
-### POST /api/consulta/ip
+Chain: dataflow -> work_bot -> voidsearch
 
 ```bash
-curl -X POST http://localhost:8000/api/consulta/ip \
+curl -X POST http://localhost:8000/api/consulta/cnpj \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: sua-api-key-aqui" \
-  -d '{"ip":"8.8.8.8"}'
+  -H "X-API-Key: change-me-key1" \
+  -d '{"cnpj":"33000167000101"}'
 ```
 
-```json
-{
-  "status": "success",
-  "link": "https://resultado-exemplo.invalid/result-consultation/ip_abc123?bot=",
-  "data": {
-    "dados_basicos": {
-      "ip": "8.8.8.8",
-      "pais": "Estados Unidos",
-      "organizacao": "Google LLC"
-    }
-  }
-}
+#### POST /api/consulta/mae
+
+Chain: work_bot -> dataflow -> unknowrealbot
+
+```bash
+curl -X POST http://localhost:8000/api/consulta/mae \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: change-me-key1" \
+  -d '{"nome":"Maria Alves"}'
 ```
 
-### POST /api/consulta/titulo
+#### POST /api/consulta/foto
+
+Chain: work_bot -> dataflow -> unknowrealbot
+
+```bash
+curl -X POST http://localhost:8000/api/consulta/foto \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: change-me-key1" \
+  -d '{"cpf":"07068093868"}'
+```
+
+#### POST /api/consulta/rg
+
+Chain: work_bot -> unix_robot
+
+```bash
+curl -X POST http://localhost:8000/api/consulta/rg \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: change-me-key1" \
+  -d '{"rg":"234730742"}'
+```
+
+#### POST /api/consulta/pai
+
+Chain: work_bot -> unknowrealbot
+
+```bash
+curl -X POST http://localhost:8000/api/consulta/pai \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: change-me-key1" \
+  -d '{"nome":"Jose Silva"}'
+```
+
+#### POST /api/consulta/cns
+
+Chain: work_bot
+
+```bash
+curl -X POST http://localhost:8000/api/consulta/cns \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: change-me-key1" \
+  -d '{"cns":"705005484822659"}'
+```
+
+#### POST /api/consulta/chave
+
+Chain: work_bot
+
+```bash
+curl -X POST http://localhost:8000/api/consulta/chave \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: change-me-key1" \
+  -d '{"cpf":"07068093868"}'
+```
+
+#### POST /api/consulta/vizinhos
+
+Chain: work_bot -> black_consultas
+
+```bash
+curl -X POST http://localhost:8000/api/consulta/vizinhos \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: change-me-key1" \
+  -d '{"cpf":"07068093868"}'
+```
+
+#### POST /api/consulta/parentes
+
+Chain: work_bot -> black_consultas
+
+```bash
+curl -X POST http://localhost:8000/api/consulta/parentes \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: change-me-key1" \
+  -d '{"cpf":"07068093868"}'
+```
+
+#### POST /api/consulta/pep
+
+Chain: work_bot
+
+```bash
+curl -X POST http://localhost:8000/api/consulta/pep \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: change-me-key1" \
+  -d '{"cpf":"07068093868"}'
+```
+
+#### POST /api/consulta/titulo
+
+Chain: dataflow -> work_bot -> unknowrealbot
 
 ```bash
 curl -X POST http://localhost:8000/api/consulta/titulo \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: sua-api-key-aqui" \
+  -H "X-API-Key: change-me-key1" \
   -d '{"titulo":"018921371805"}'
 ```
 
-```json
-{
-  "status": "success",
-  "link": "https://resultado-exemplo.invalid/result-consultation/titulo_abc123?bot=",
-  "data": {
-    "dados_basicos": {
-      "titulo": "018921371805",
-      "nome": "JOAO DA SILVA",
-      "zona": "123",
-      "secao": "456"
-    }
-  }
-}
-```
+#### POST /api/consulta/pix
 
-### POST /api/consulta/pix
-
-O endpoint específico `/api/consulta/pix` usa a base `pix` por padrão.
+Chain: black_consultas
 
 ```bash
 curl -X POST http://localhost:8000/api/consulta/pix \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: sua-api-key-aqui" \
+  -H "X-API-Key: change-me-key1" \
   -d '{"nome":"douglas da costa silva","meio_cpf":"226471"}'
 ```
 
-```json
-{
-  "status": "success",
-  "link": "https://resultado-exemplo.invalid/result-consultation/pix_abc123?bot=",
-  "data": {
-    "dados_basicos": {
-      "nome": "DOUGLAS DA COSTA SILVA",
-      "meio_cpf": "226471",
-      "instituicao": "BANCO EXEMPLO"
-    }
-  }
-}
+### Veículo
+
+#### POST /api/consulta/placa
+
+Chain: work_bot -> unknowrealbot -> voidsearch
+
+```bash
+curl -X POST http://localhost:8000/api/consulta/placa \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: change-me-key1" \
+  -d '{"placa":"ABC1D23"}'
 ```
 
-### POST /api/consulta
+#### POST /api/consulta/proprietario
 
-Endpoint genérico para quem prefere escolher `tipo` e `base` em um único payload. Também é a forma de acionar a base `pix2`.
+Chain: work_bot
+
+```bash
+curl -X POST http://localhost:8000/api/consulta/proprietario \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: change-me-key1" \
+  -d '{"placa":"ABC1D23"}'
+```
+
+#### POST /api/consulta/condutor
+
+Chain: work_bot
+
+```bash
+curl -X POST http://localhost:8000/api/consulta/condutor \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: change-me-key1" \
+  -d '{"cpf":"07068093868"}'
+```
+
+#### POST /api/consulta/frota
+
+Chain: work_bot
+
+```bash
+curl -X POST http://localhost:8000/api/consulta/frota \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: change-me-key1" \
+  -d '{"cnpj":"33000167000101"}'
+```
+
+### Localização
+
+#### POST /api/consulta/cep
+
+Chain: unix_robot -> dataflow -> work_bot -> voidsearch -> black_consultas
+
+```bash
+curl -X POST http://localhost:8000/api/consulta/cep \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: change-me-key1" \
+  -d '{"cep":"01310100"}'
+```
+
+#### POST /api/consulta/endereco
+
+Chain: dataflow
+
+```bash
+curl -X POST http://localhost:8000/api/consulta/endereco \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: change-me-key1" \
+  -d '{"cpf":"07068093868"}'
+```
+
+#### POST /api/consulta/ddd
+
+Chain: voidsearch
+
+```bash
+curl -X POST http://localhost:8000/api/consulta/ddd \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: change-me-key1" \
+  -d '{"ddd":"19"}'
+```
+
+#### POST /api/consulta/ip
+
+Chain: unknowrealbot -> voidsearch -> black_consultas
+
+```bash
+curl -X POST http://localhost:8000/api/consulta/ip \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: change-me-key1" \
+  -d '{"ip":"8.8.8.8"}'
+```
+
+### Sistema
+
+#### POST /api/consulta/bin
+
+Chain: dataflow
+
+```bash
+curl -X POST http://localhost:8000/api/consulta/bin \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: change-me-key1" \
+  -d '{"bin":"516230"}'
+```
+
+#### POST /api/consulta/processo
+
+Chain: work_bot
+
+```bash
+curl -X POST http://localhost:8000/api/consulta/processo \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: change-me-key1" \
+  -d '{"numero":"1234567"}'
+```
+
+#### POST /api/consulta
+
+Endpoint genérico para roteamento por tipo.
 
 ```bash
 curl -X POST http://localhost:8000/api/consulta \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: sua-api-key-aqui" \
-  -d '{"tipo":"pix","input":"douglas da costa silva|226471","base":"pix2"}'
+  -H "X-API-Key: change-me-key1" \
+  -d '{"tipo":"cpf","input":"12974572936","base":"completo"}'
 ```
 
-```json
-{
-  "status": "success",
-  "link": "https://resultado-exemplo.invalid/result-consultation/pix2_abc123?bot=",
-  "data": {
-    "dados_basicos": {
-      "nome": "DOUGLAS DA COSTA SILVA",
-      "meio_cpf": "226471",
-      "instituicao": "BANCO EXEMPLO"
-    }
-  }
-}
+## Códigos HTTP comuns
+
+| Código | Cenário |
+| --- | --- |
+| 401 | API key ausente ou inválida |
+| 403 | Base ou bot exige assinatura |
+| 404 | Resultado não encontrado |
+| 422 | Payload inválido |
+| 429 | Rate limit da API key excedido |
+| 503 | Todos os bots falharam, serviço em shutdown ou auth do servidor não configurada |
+| 504 | Timeout em todas as tentativas disponíveis |
+| 500 | Erro interno inesperado |
+
+## Deploy em VPS
+
+O arquivo deploy.sh foi incluído para deploy simples em Oracle VPS:
+
+```bash
+chmod +x deploy.sh
+./deploy.sh
 ```
 
-## Estrutura de pastas
+Conteúdo:
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+cd /opt/consultas-api
+git pull
+docker compose down
+docker compose up -d --build
+docker compose logs -f --tail=50
+```
+
+## Troubleshooting
+
+### Swagger abre, mas chamadas retornam 401
+
+Informe o header X-API-Key nas requisições protegidas. O /docs é público, mas a maioria dos endpoints /api não é.
+
+### /api/status ou /api/consulta retornam 503 logo no boot
+
+Verifique se API_KEYS ou API_SECRET_KEY estão configuradas e se as StringSession do Telegram continuam autorizadas.
+
+### Muitas respostas 429
+
+O rate limit agora é por API key. Distribua consumo entre chaves diferentes ou aumente MAX_REQUESTS_PER_MINUTE com cautela.
+
+### /api/consulta/placa falha em captcha
+
+Confira VOIDAI_API_KEY, VOIDAI_MODEL e os logs do Work Bot. O router fará fallback quando houver alternativa saudável.
+
+### Não use múltiplos workers
+
+Telethon não é multiprocess safe neste projeto. Mantenha uvicorn com --workers 1.
+
+## Estrutura principal
 
 ```text
 consultas-api/
@@ -552,90 +621,13 @@ consultas-api/
 ├── .env.example
 ├── Dockerfile
 ├── docker-compose.yml
+├── deploy.sh
 ├── requirements.txt
 ├── pyproject.toml
-├── test_manual.py
-└── README.md
+├── README.md
+└── test_manual.py
 ```
-
-Resumo dos diretórios e arquivos principais:
-
-- `app/config.py`: leitura do `.env` e propriedades derivadas, como a lista de API keys aceitas.
-- `app/main.py`: inicialização da aplicação, middleware de auth/rate limit, lifespan, health e status.
-- `app/models/`: schemas Pydantic de entrada e saída.
-- `app/routes/consultas.py`: endpoints HTTP e orquestração do fluxo de consulta.
-- `app/services/account_pool.py`: seleção das contas Telegram com lock e round-robin.
-- `app/services/telegram_worker.py`: envio do comando, clique em botões e tratamento das respostas do serviço.
-- `app/services/scraper.py`: busca e parse do resultado estruturado.
-- `app/services/cache.py`: cache em memória com TTL e chave SHA-256.
-- `app/services/request_rate_limiter.py`: rate limit por IP.
-- `app/services/runtime_state.py`: métricas simples de runtime e último erro.
-- `app/utils/logger.py`: logging JSON para stdout.
-- `.env.example`: template completo das variáveis de ambiente.
-- `test_manual.py`: script de smoke test para a rota de CPF.
-
-## Erros e códigos HTTP
-
-| Código | Cenário |
-| --- | --- |
-| `401 Unauthorized` | `X-API-Key` ausente ou inválida |
-| `403 Forbidden` | A base consultada exige assinatura ativa |
-| `404 Not Found` | O serviço Telegram não encontrou resultado para a consulta |
-| `422 Unprocessable Entity` | Payload inválido, base incompatível ou input rejeitado |
-| `429 Too Many Requests` | Limite por IP excedido |
-| `503 Service Unavailable` | Serviço upstream em manutenção ou autenticação do servidor não configurada |
-| `504 Gateway Timeout` | Timeout em todas as contas disponíveis durante a consulta |
-| `500 Internal Server Error` | Falha inesperada no processamento interno |
-
-Exemplo de erro `401`:
-
-```json
-{
-  "detail": "API key ausente ou inválida."
-}
-```
-
-Exemplo de erro `429`:
-
-```json
-{
-  "detail": "Rate limit excedido. Tente novamente mais tarde."
-}
-```
-
-## Limitações conhecidas
-
-- O fluxo do serviço Telegram pode mudar sem aviso, inclusive alternando entre editar a mensagem original e responder com uma nova mensagem em reply.
-- O cache é somente em memória e é perdido ao reiniciar a aplicação.
-- O rate limiting por IP é local ao processo; múltiplas instâncias não compartilham contadores.
-- O endpoint `/api/consulta/pix` usa apenas a base `pix`; para `pix2`, utilize o endpoint genérico.
-- O endpoint `/api/consulta/ip` valida apenas IPv4.
-- `API_HOST` e `API_PORT` existem na configuração, mas o comando padrão do Uvicorn e o Dockerfile continuam usando `0.0.0.0:8000` explicitamente.
-- A UI em `/docs` documenta os schemas, mas a autenticação por `X-API-Key` é aplicada por middleware; para chamadas autenticadas, `curl` ou Postman continuam sendo as formas mais previsíveis de teste.
-
-## Contribuindo
-
-Contribuições são bem-vindas.
-
-Fluxo sugerido:
-
-1. Abra uma issue ou descreva o problema com contexto suficiente.
-2. Crie uma branch para a sua alteração.
-3. Rode a API localmente e valide o fluxo afetado.
-4. Se alterar contrato HTTP, atualize também a documentação.
-5. Envie um pull request com escopo objetivo e descrição clara.
-
-Checklist recomendado antes de abrir PR:
-
-- Verificar se o `.env.example` continua compatível com `app/config.py`.
-- Testar pelo menos `GET /api/health` e um endpoint de consulta.
-- Revisar logs e mensagens de erro geradas pela alteração.
-- Atualizar o [CHANGELOG.md](CHANGELOG.md) quando a mudança for relevante para usuários do projeto.
-
-## Changelog
-
-O histórico de releases está em [CHANGELOG.md](CHANGELOG.md).
 
 ## Licença
 
-Distribuído sob a licença MIT. Veja [LICENSE](LICENSE) para o texto completo.
+Distribuído sob a licença MIT. Veja LICENSE.

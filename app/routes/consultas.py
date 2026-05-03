@@ -1,3 +1,4 @@
+import json
 import time
 from typing import Any
 
@@ -38,13 +39,13 @@ from app.models.requests import (
 from app.models.responses import ConsultaResponse, ErrorResponse
 from app.services.account_pool import AccountPool
 from app.services.adapters import AllBotsFailedError, BotResponseError
-from app.services.bot_router import BotRouter
+from app.services.bot_router import FALLBACK_CHAINS, BotRouter
 from app.services.cache import ResultCache
 from app.services.runtime_state import RuntimeState
 from app.utils.logger import get_logger, get_request_id
 
 
-router = APIRouter(prefix="/api/consulta", tags=["consultas"])
+router = APIRouter(prefix="/api/consulta")
 logger = get_logger("routes.consultas")
 
 COMMON_ERROR_RESPONSES = {
@@ -57,6 +58,274 @@ COMMON_ERROR_RESPONSES = {
     503: {"model": ErrorResponse, "description": "Todos os bots disponíveis falharam ou o módulo está indisponível."},
     504: {"model": ErrorResponse, "description": "Timeout ao consultar o bot em todas as contas disponíveis."},
 }
+
+
+def _success_example(data: dict[str, Any], link: str = "") -> dict[str, Any]:
+    return {
+        "status": "success",
+        "link": link,
+        "data": data,
+    }
+
+
+CONSULTATION_OPENAPI_METADATA: dict[str, dict[str, Any]] = {
+    "/cpf": {
+        "tipo": "cpf",
+        "tag": "Pessoa",
+        "summary": "Consultar CPF",
+        "what": "Consulta dados cadastrais e bases gratuitas de CPF com fallback automático entre múltiplos bots Telegram.",
+        "request_example": {"cpf": "12974572936", "base": "completo"},
+        "response_example": _success_example({"dados_basicos": {"cpf": "12974572936", "nome": "JOAO DA SILVA", "situacao_cadastral": "REGULAR"}}),
+    },
+    "/nome": {
+        "tipo": "nome",
+        "tag": "Pessoa",
+        "summary": "Consultar nome completo",
+        "what": "Pesquisa um nome completo e retorna correspondências estruturadas com fallback entre os bots compatíveis.",
+        "request_example": {"nome": "João da Silva Santos", "base": "nome"},
+        "response_example": _success_example({"dados_basicos": {"nome": "JOAO DA SILVA SANTOS", "cpf": "12974572936", "data_nascimento": "07/01/2010"}}),
+    },
+    "/telefone": {
+        "tipo": "telefone",
+        "tag": "Pessoa",
+        "summary": "Consultar telefone",
+        "what": "Consulta um telefone com DDD e tenta reconstruir vínculo com pessoa e localização.",
+        "request_example": {"telefone": "44988030666", "base": "telefone"},
+        "response_example": _success_example({"dados_basicos": {"telefone": "44988030666", "nome": "JOAO DA SILVA", "cidade_uf": "MARINGA/PR"}}),
+    },
+    "/cep": {
+        "tipo": "cep",
+        "tag": "Localização",
+        "summary": "Consultar CEP",
+        "what": "Consulta um CEP e retorna endereço estruturado; a chain prioriza respostas inline mais rápidas.",
+        "request_example": {"cep": "01310100"},
+        "response_example": _success_example({"dados_basicos": {"cep": "01310100", "logradouro": "AV PAULISTA", "bairro": "BELA VISTA", "cidade_uf": "SAO PAULO/SP"}}),
+    },
+    "/email": {
+        "tipo": "email",
+        "tag": "Pessoa",
+        "summary": "Consultar e-mail",
+        "what": "Consulta um endereço de e-mail com fallback entre DataFlow, Work Bot, Unknowrealbot e Black Consultas.",
+        "request_example": {"email": "joao@gmail.com", "base": "email"},
+        "response_example": _success_example({"dados_basicos": {"email": "joao@gmail.com", "nome": "JOAO DA SILVA", "cidade_uf": "CIANORTE/PR"}}),
+    },
+    "/cnpj": {
+        "tipo": "cnpj",
+        "tag": "Pessoa",
+        "summary": "Consultar CNPJ",
+        "what": "Consulta dados empresariais de CNPJ usando a chain configurada para fontes que suportam esse tipo.",
+        "request_example": {"cnpj": "33000167000101"},
+        "response_example": _success_example({"dados_basicos": {"cnpj": "33000167000101", "razao_social": "PETROBRAS", "situacao": "ATIVA"}}),
+    },
+    "/bin": {
+        "tipo": "bin",
+        "tag": "Sistema",
+        "summary": "Consultar BIN",
+        "what": "Retorna metadados básicos do cartão a partir do BIN informado.",
+        "request_example": {"bin": "516230"},
+        "response_example": _success_example({"dados_basicos": {"bin": "516230", "bandeira": "MASTERCARD", "tipo": "CREDIT"}}),
+    },
+    "/endereco": {
+        "tipo": "endereco",
+        "tag": "Localização",
+        "summary": "Consultar endereço",
+        "what": "Consulta endereço a partir de um CPF, retornando dados estruturados de localização quando disponíveis.",
+        "request_example": {"cpf": "07068093868"},
+        "response_example": _success_example({"dados_basicos": {"cpf": "07068093868", "logradouro": "RUA EXEMPLO", "numero": "120", "cidade_uf": "SAO PAULO/SP"}}),
+    },
+    "/mae": {
+        "tipo": "mae",
+        "tag": "Pessoa",
+        "summary": "Consultar mãe",
+        "what": "Consulta nome da mãe e relaciona resultados pessoais a partir do nome completo informado.",
+        "request_example": {"nome": "Maria Alves"},
+        "response_example": _success_example({"dados_basicos": {"nome_mae": "MARIA ALVES", "cpf": "07068093868", "nome": "JOAO ALVES"}}),
+    },
+    "/foto": {
+        "tipo": "foto",
+        "tag": "Pessoa",
+        "summary": "Consultar foto",
+        "what": "Aciona bots capazes de devolver foto ou indicação de mídia associada ao CPF consultado.",
+        "request_example": {"cpf": "07068093868"},
+        "response_example": _success_example({"dados_basicos": {"cpf": "07068093868", "nome": "JOAO ALVES"}, "media": {"type": "image", "available": True}}),
+    },
+    "/rg": {
+        "tipo": "rg",
+        "tag": "Pessoa",
+        "summary": "Consultar RG",
+        "what": "Consulta um RG alfanumérico usando os adapters que oferecem esse tipo de busca.",
+        "request_example": {"rg": "234730742"},
+        "response_example": _success_example({"dados_basicos": {"rg": "234730742", "nome": "JOAO DA SILVA", "uf": "SP"}}),
+    },
+    "/pai": {
+        "tipo": "pai",
+        "tag": "Pessoa",
+        "summary": "Consultar pai",
+        "what": "Consulta o nome do pai e retorna vínculos pessoais compatíveis com o nome informado.",
+        "request_example": {"nome": "Jose Silva"},
+        "response_example": _success_example({"dados_basicos": {"nome_pai": "JOSE SILVA", "cpf": "07068093868", "nome": "ANA SILVA"}}),
+    },
+    "/placa": {
+        "tipo": "placa",
+        "tag": "Veículo",
+        "summary": "Consultar placa",
+        "what": "Consulta uma placa veicular, com fallback entre adapters e resolução automática de captcha quando necessário.",
+        "request_example": {"placa": "ABC1D23"},
+        "response_example": _success_example({"dados_basicos": {"placa": "ABC1D23", "marca_modelo": "FIAT ARGO", "uf": "SP"}}),
+    },
+    "/proprietario": {
+        "tipo": "proprietario",
+        "tag": "Veículo",
+        "summary": "Consultar proprietário por placa",
+        "what": "Consulta o proprietário de um veículo a partir da placa informada.",
+        "request_example": {"placa": "ABC1D23"},
+        "response_example": _success_example({"dados_basicos": {"placa": "ABC1D23", "nome": "JOAO DA SILVA", "cpf": "07068093868"}}),
+    },
+    "/cns": {
+        "tipo": "cns",
+        "tag": "Pessoa",
+        "summary": "Consultar CNS",
+        "what": "Consulta um CNS e retorna o cadastro associado quando disponível.",
+        "request_example": {"cns": "705005484822659"},
+        "response_example": _success_example({"dados_basicos": {"cns": "705005484822659", "nome": "JOAO DA SILVA"}}),
+    },
+    "/chave": {
+        "tipo": "chave",
+        "tag": "Pessoa",
+        "summary": "Consultar chave PIX",
+        "what": "Consulta chaves PIX relacionadas ao CPF informado.",
+        "request_example": {"cpf": "07068093868"},
+        "response_example": _success_example({"dados_basicos": {"cpf": "07068093868", "chave_pix": "joao@email.com", "tipo": "email"}}),
+    },
+    "/vizinhos": {
+        "tipo": "vizinhos",
+        "tag": "Pessoa",
+        "summary": "Consultar vizinhos",
+        "what": "Consulta possíveis vizinhos ou corresidentes relacionados ao CPF informado.",
+        "request_example": {"cpf": "07068093868"},
+        "response_example": _success_example({"dados_basicos": {"cpf": "07068093868"}, "vizinhos": [{"nome": "MARIA SILVA", "logradouro": "RUA EXEMPLO"}]}),
+    },
+    "/parentes": {
+        "tipo": "parentes",
+        "tag": "Pessoa",
+        "summary": "Consultar parentes",
+        "what": "Consulta vínculos familiares relacionados ao CPF informado.",
+        "request_example": {"cpf": "07068093868"},
+        "response_example": _success_example({"dados_basicos": {"cpf": "07068093868"}, "parentes": [{"nome": "MARIA SILVA", "grau": "MAE"}]}),
+    },
+    "/pep": {
+        "tipo": "pep",
+        "tag": "Pessoa",
+        "summary": "Consultar PEP",
+        "what": "Verifica indícios ou marcações de PEP para o CPF informado.",
+        "request_example": {"cpf": "07068093868"},
+        "response_example": _success_example({"dados_basicos": {"cpf": "07068093868", "nome": "JOAO DA SILVA", "pep": "NAO"}}),
+    },
+    "/condutor": {
+        "tipo": "condutor",
+        "tag": "Veículo",
+        "summary": "Consultar condutor",
+        "what": "Consulta dados de condutor e habilitação relacionados ao CPF informado.",
+        "request_example": {"cpf": "07068093868"},
+        "response_example": _success_example({"dados_basicos": {"cpf": "07068093868", "cnh": "12345678900", "categoria": "B"}}),
+    },
+    "/frota": {
+        "tipo": "frota",
+        "tag": "Veículo",
+        "summary": "Consultar frota",
+        "what": "Consulta a frota vinculada a um CNPJ e retorna lista de veículos quando disponível.",
+        "request_example": {"cnpj": "33000167000101"},
+        "response_example": _success_example({"dados_basicos": {"cnpj": "33000167000101", "razao_social": "PETROBRAS"}, "veiculos": [{"placa": "ABC1D23", "marca_modelo": "FIAT ARGO"}]}),
+    },
+    "/processo": {
+        "tipo": "processo_numero",
+        "tag": "Sistema",
+        "summary": "Consultar processo",
+        "what": "Consulta um número de processo e devolve dados básicos do andamento encontrado.",
+        "request_example": {"numero": "1234567"},
+        "response_example": _success_example({"dados_basicos": {"numero": "1234567", "tribunal": "TJSP", "status": "EM ANDAMENTO"}}),
+    },
+    "/ddd": {
+        "tipo": "ddd",
+        "tag": "Localização",
+        "summary": "Consultar DDD",
+        "what": "Consulta o DDD informado e devolve estado e cidades associadas.",
+        "request_example": {"ddd": "19"},
+        "response_example": _success_example({"dados_basicos": {"ddd": "19", "uf": "SP", "cidades": ["Campinas", "Americana"]}}),
+    },
+    "/ip": {
+        "tipo": "ip",
+        "tag": "Localização",
+        "summary": "Consultar IP",
+        "what": "Consulta um IPv4 e retorna dados básicos de geolocalização e organização.",
+        "request_example": {"ip": "8.8.8.8"},
+        "response_example": _success_example({"dados_basicos": {"ip": "8.8.8.8", "pais": "Estados Unidos", "organizacao": "Google LLC"}}),
+    },
+    "/titulo": {
+        "tipo": "titulo",
+        "tag": "Pessoa",
+        "summary": "Consultar título de eleitor",
+        "what": "Consulta um título de eleitor e retorna dados eleitorais básicos quando disponíveis.",
+        "request_example": {"titulo": "018921371805"},
+        "response_example": _success_example({"dados_basicos": {"titulo": "018921371805", "nome": "JOAO DA SILVA", "zona": "123", "secao": "456"}}),
+    },
+    "/pix": {
+        "tipo": "pix",
+        "tag": "Pessoa",
+        "summary": "Consultar PIX",
+        "what": "Consulta a base PIX padrão do Black Consultas usando nome e meio CPF como entrada.",
+        "request_example": {"nome": "douglas da costa silva", "meio_cpf": "226471"},
+        "response_example": _success_example({"dados_basicos": {"nome": "DOUGLAS DA COSTA SILVA", "meio_cpf": "226471", "instituicao": "BANCO EXEMPLO"}}, link="https://blackconsultas.com/result-consultation/pix_abc123?bot="),
+    },
+    "": {
+        "tipo": None,
+        "tag": "Sistema",
+        "summary": "Consultar via endpoint genérico",
+        "what": "Recebe tipo, input e base em um único payload e aplica a chain correspondente ao tipo informado.",
+        "request_example": {"tipo": "cpf", "input": "12974572936", "base": "completo"},
+        "response_example": _success_example({"dados_basicos": {"cpf": "12974572936", "nome": "JOAO DA SILVA", "situacao_cadastral": "REGULAR"}}),
+        "notes": "A chain de bots varia conforme o campo tipo do payload.",
+    },
+}
+
+
+def _build_openapi_description(metadata: dict[str, Any]) -> str:
+    lines = [str(metadata["what"])]
+
+    tipo = metadata.get("tipo")
+    if tipo is None:
+        lines.extend(["", str(metadata.get("notes") or "A chain de fallback depende do tipo solicitado.")])
+    else:
+        chain = " -> ".join(FALLBACK_CHAINS.get(tipo, []))
+        lines.extend(["", f"Bots que podem responder: {chain}."])
+        if metadata.get("notes"):
+            lines.extend(["", str(metadata["notes"])])
+
+    lines.extend(
+        [
+            "",
+            "Exemplo de entrada:",
+            "```json",
+            json.dumps(metadata["request_example"], ensure_ascii=False, indent=2),
+            "```",
+            "",
+            "Exemplo de saída:",
+            "```json",
+            json.dumps(metadata["response_example"], ensure_ascii=False, indent=2),
+            "```",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _apply_route_openapi_metadata() -> None:
+    for route in router.routes:
+        metadata = CONSULTATION_OPENAPI_METADATA.get(route.path.removeprefix("/api/consulta"))
+        if metadata is None:
+            continue
+        route.summary = str(metadata["summary"])
+        route.description = _build_openapi_description(metadata)
+        route.tags = [str(metadata["tag"])]
 
 
 def _build_cache_command(tipo: ConsultationType, query_input: str) -> str:
@@ -88,6 +357,7 @@ async def _execute_consulta(
 ) -> dict[str, Any]:
     command = _build_cache_command(tipo, query_input)
     request_id = get_request_id()
+    cache_outcome: str | None = None
     await runtime_state.start_query()
 
     try:
@@ -104,6 +374,7 @@ async def _execute_consulta(
         cached_payload = cache.get(command, base)
 
         if cached_payload is not None:
+            cache_outcome = "hit"
             logger.info(
                 "Consulta servida do cache.",
                 extra={
@@ -117,6 +388,7 @@ async def _execute_consulta(
             return cached_payload
 
         stale_payload = cache.get_stale(command, base)
+        cache_outcome = "miss"
         started_at = time.monotonic()
         try:
             adapter_result = await bot_router.route_query_with_pool(pool, tipo, query_input, base)
@@ -142,6 +414,7 @@ async def _execute_consulta(
             preferred_exception = exc.preferred_exception
 
             if stale_payload is not None:
+                cache_outcome = "stale"
                 response.headers["X-Cache"] = "STALE"
                 await runtime_state.record_error(
                     "stale_fallback",
@@ -323,6 +596,8 @@ async def _execute_consulta(
                 headers={"X-Cache": "MISS"},
             ) from exc
     finally:
+        if cache_outcome is not None:
+            await runtime_state.record_cache_event(cache_outcome)
         await runtime_state.finish_query()
 
 
@@ -1208,3 +1483,6 @@ async def consulta_generica(
         query_input=query_input,
         base=base,
     )
+
+
+_apply_route_openapi_metadata()

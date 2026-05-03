@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
@@ -17,16 +18,20 @@ class Settings(BaseSettings):
     telegram_api_hash: str
     telegram_session_string_bryan: str
     telegram_session_string_bryan2: str
-    telegram_group_id: int
+    telegram_group_id: int = Field(
+        default=-1002396715550,
+        validation_alias=AliasChoices("GROUP_BLACK_CONSULTAS", "TELEGRAM_GROUP_ID"),
+    )
     group_dataflow: int = -1003340385645
     group_tamaki: int = -1002411246251
     group_don: int = -1002336848941
     group_unen: int = -1003761336113
     telegram_timeout: int = 15
     rate_limit_interval: float = 3.0
-    max_requests_per_minute: int = 20
+    max_requests_per_minute: int = 60
     cache_ttl_hours: int = 24
     voidai_api_key: str = ""
+    voidai_model: str = "gemini-2.0-flash"
     api_secret_key: str = ""
     api_keys: str = ""
     api_host: str = "0.0.0.0"
@@ -48,6 +53,10 @@ class Settings(BaseSettings):
     def cors_origin_list(self) -> list[str]:
         origins = [item.strip() for item in self.cors_origins.split(",") if item.strip()]
         return origins or ["*"]
+
+    @property
+    def black_consultas_group_id(self) -> int:
+        return self.telegram_group_id
 
     @property
     def primary_api_key(self) -> str | None:

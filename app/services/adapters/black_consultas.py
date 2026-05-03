@@ -81,7 +81,7 @@ COMMAND_MAP: dict[str, CommandDefinition] = {
 
 class BlackConsultasAdapter(BotAdapter):
     name = "black_consultas"
-    group_id = settings.telegram_group_id
+    group_id = settings.black_consultas_group_id
     bot_username = "BlackConsultaasBot"
     supported_commands = ("cpf", "nome", "telefone", "email", "cep", "ip", "titulo", "pix")
 
@@ -89,7 +89,7 @@ class BlackConsultasAdapter(BotAdapter):
         self,
         scraper: Callable[[str], Awaitable[dict[str, Any]]] = scrape_result,
     ):
-        self.group_id = settings.telegram_group_id
+        self.group_id = settings.black_consultas_group_id
         self._scraper = scraper
 
     def supports(self, tipo: str, base: str | None = None) -> bool:

@@ -11,7 +11,6 @@ from app.utils.logger import get_logger
 logger = get_logger("services.captcha_solver")
 
 VOIDAI_URL = "https://api.voidai.app/v1/chat/completions"
-MODEL = "gemini-2.0-flash"
 MAX_RETRIES = 2
 
 
@@ -22,6 +21,7 @@ class CaptchaError(Exception):
 class CaptchaSolver:
     def __init__(self) -> None:
         self._api_key = settings.voidai_api_key
+        self._model = settings.voidai_model or "gemini-2.0-flash"
 
     async def solve(self, image_bytes: bytes, options: list[str]) -> str:
         if not self._api_key.strip():
@@ -34,7 +34,7 @@ class CaptchaSolver:
         options_str = ", ".join(options)
 
         payload = {
-            "model": MODEL,
+            "model": self._model,
             "messages": [
                 {
                     "role": "user",
@@ -54,7 +54,7 @@ class CaptchaSolver:
                     ],
                 }
             ],
-            "max_tokens": 20,
+            "max_tokens": self._resolve_max_tokens(),
             "temperature": 0,
         }
 
@@ -83,7 +83,7 @@ class CaptchaSolver:
                             "answer": matched,
                             "attempt": attempt,
                             "duration_ms": elapsed,
-                            "model": MODEL,
+                            "model": self._model,
                         },
                     )
                     return matched
@@ -96,7 +96,7 @@ class CaptchaSolver:
                         "options": options,
                         "attempt": attempt,
                         "duration_ms": elapsed,
-                        "model": MODEL,
+                        "model": self._model,
                     },
                 )
             except (httpx.HTTPStatusError, httpx.TimeoutException, ValueError, KeyError) as exc:
@@ -108,7 +108,7 @@ class CaptchaSolver:
                         "error": str(exc),
                         "attempt": attempt,
                         "duration_ms": elapsed,
-                        "model": MODEL,
+                        "model": self._model,
                     },
                 )
 
@@ -149,3 +149,9 @@ class CaptchaSolver:
             if opt.upper().strip() in answer_upper:
                 return opt
         return None
+
+    def _resolve_max_tokens(self) -> int:
+        model_name = self._model.lower()
+        if "2.0-flash" in model_name:
+            return 20
+        return 500

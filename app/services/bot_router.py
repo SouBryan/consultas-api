@@ -312,6 +312,9 @@ class BotRouter:
     def get_bot_statuses(self) -> dict[str, dict[str, Any]]:
         return self._health_tracker.get_statuses(self.adapter_names)
 
+    def get_bot_metrics(self) -> dict[str, dict[str, Any]]:
+        return self._health_tracker.get_metrics(self.adapter_names)
+
     def describe_chain(self, tipo: str, base: str | None = None) -> dict[str, Any]:
         chain = self._get_chain(tipo)
         health_statuses = self._health_tracker.get_statuses(list(dict.fromkeys(chain)))

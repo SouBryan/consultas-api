@@ -102,3 +102,49 @@ class StatusResponse(BaseModel):
             }
         }
     )
+
+
+class AdapterMetricsResponse(BaseModel):
+    queries: int = Field(description="Quantidade total de tentativas atribuídas ao adapter desde o boot.")
+    successes: int = Field(description="Quantidade total de tentativas bem-sucedidas desde o boot.")
+    avg_time_ms: float | None = Field(default=None, description="Tempo médio recente de resposta do adapter, em milissegundos.")
+
+
+class AccountMetricsResponse(BaseModel):
+    connected: bool = Field(description="Indica se a conta Telegram está conectada no momento.")
+    queries_today: int = Field(description="Quantidade de tentativas atribuídas à conta no dia corrente.")
+
+
+class MetricsResponse(BaseModel):
+    uptime_seconds: float = Field(description="Tempo total de atividade do processo em segundos.")
+    total_queries: int = Field(description="Total de consultas HTTP de negócio recebidas desde o boot.")
+    queries_last_hour: int = Field(description="Quantidade de consultas recebidas na última hora.")
+    cache_hit_rate: float = Field(description="Taxa de respostas servidas do cache, incluindo fallback stale, entre 0 e 1.")
+    adapter_stats: dict[str, AdapterMetricsResponse] = Field(description="Métricas agregadas por adapter Telegram.")
+    circuit_breakers: dict[str, str] = Field(description="Estado atual do circuit breaker de cada adapter.")
+    accounts: dict[str, AccountMetricsResponse] = Field(description="Métricas e estado das contas Telegram configuradas.")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "uptime_seconds": 3600.0,
+                "total_queries": 150,
+                "queries_last_hour": 42,
+                "cache_hit_rate": 0.35,
+                "adapter_stats": {
+                    "dataflow": {"queries": 80, "successes": 76, "avg_time_ms": 3200.0},
+                    "work_bot": {"queries": 40, "successes": 32, "avg_time_ms": 8100.0},
+                    "black_consultas": {"queries": 30, "successes": 24, "avg_time_ms": 5400.0}
+                },
+                "circuit_breakers": {
+                    "dataflow": "closed",
+                    "voidsearch": "open",
+                    "black_consultas": "closed"
+                },
+                "accounts": {
+                    "bryan": {"connected": True, "queries_today": 75},
+                    "bryan2": {"connected": True, "queries_today": 75}
+                }
+            }
+        }
+    )

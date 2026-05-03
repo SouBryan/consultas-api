@@ -1,4 +1,5 @@
 import asyncio
+from datetime import date
 
 from telethon import TelegramClient
 
@@ -22,6 +23,9 @@ class AccountPool:
         self._availability_event.set()
         self._index = 0
         self._rate_limiter = rate_limiter
+        self._current_day = date.today()
+        self._queries_today: dict[str, int] = {label: 0 for label in self._labels}
+        self._total_queries: dict[str, int] = {label: 0 for label in self._labels}
 
     async def acquire(
         self,
@@ -45,6 +49,7 @@ class AccountPool:
 
                     await account_lock.acquire()
                     self._index = (index + 1) % total_accounts
+                    self._mark_selected_locked(label)
                     selected = (label, self._clients[label])
                     break
 
@@ -80,6 +85,7 @@ class AccountPool:
 
                 await account_lock.acquire()
                 self._index = (index + 1) % total_accounts
+                self._mark_selected_locked(label)
                 selected = (label, self._clients[label])
                 break
 
@@ -106,3 +112,27 @@ class AccountPool:
     @property
     def size(self) -> int:
         return len(self._labels)
+
+    async def stats_snapshot(self) -> dict[str, dict[str, int]]:
+        async with self._selection_lock:
+            self._rollover_day_if_needed_locked()
+            return {
+                label: {
+                    "queries_today": self._queries_today.get(label, 0),
+                    "total_queries": self._total_queries.get(label, 0),
+                }
+                for label in self._labels
+            }
+
+    def _mark_selected_locked(self, label: str) -> None:
+        self._rollover_day_if_needed_locked()
+        self._queries_today[label] = self._queries_today.get(label, 0) + 1
+        self._total_queries[label] = self._total_queries.get(label, 0) + 1
+
+    def _rollover_day_if_needed_locked(self) -> None:
+        today = date.today()
+        if today == self._current_day:
+            return
+
+        self._current_day = today
+        self._queries_today = {label: 0 for label in self._labels}
