@@ -412,17 +412,6 @@ curl -X POST http://localhost:8000/api/consulta/titulo \
   -d '{"titulo":"018921371805"}'
 ```
 
-#### POST /api/consulta/pix
-
-Chain: black_consultas
-
-```bash
-curl -X POST http://localhost:8000/api/consulta/pix \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: change-me-key1" \
-  -d '{"nome":"douglas da costa silva","meio_cpf":"226471"}'
-```
-
 ### Veículo
 
 #### POST /api/consulta/placa

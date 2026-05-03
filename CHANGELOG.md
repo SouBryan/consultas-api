@@ -4,6 +4,36 @@ Todas as mudanças relevantes deste projeto são documentadas neste arquivo.
 
 O formato segue as recomendações de Keep a Changelog e versionamento semântico.
 
+## [0.7.0] - 2026-05-03
+
+### Removed
+
+- Endpoint `/api/consulta/pix` removido (BlackConsultas exige assinatura paga).
+
+### Fixed
+
+- Corrigido `sender_id` filter e transient markers nos adapters DON (unix_robot, unknowrealbot, voidsearch).
+
+## [0.6.0] - 2026-05-03
+
+### Added
+
+- Health tracking por adapter com success rate e tempos médios.
+- Circuit breaker com estados closed/open/half-open e cooldown automático.
+- Failover paralelo ativado quando o adapter primário ultrapassa 10s.
+- Stale cache fallback quando todos os adapters falham.
+- Endpoint `GET /api/debug/last-errors` para inspeção dos últimos erros por adapter.
+- Detecção automática de bots pagos em runtime (marcação `bot_router_paid_only`).
+
+## [0.5.0] - 2026-05-02
+
+### Added
+
+- Adapters Unknowrealbot, Unix Robot e VoidSearch com suporte a inline results e link scraping.
+- Fallback chains expandidas para 24 tipos de consulta usando 6 adapters.
+- Conta Telegram secundária (bryan2) no pool para aumento de throughput.
+- Rate limit interno por grupo Telegram.
+
 ## [0.4.1] - 2026-05-02
 
 ### Fixed
