@@ -4,14 +4,19 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import ValidationError
 
-from app.main import get_cache, get_pool, get_runtime_state
+from app.main import get_bot_router, get_cache, get_pool, get_runtime_state
 from app.models.requests import (
     ConsultationType,
+    ConsultaBINRequest,
     ConsultaCEPRequest,
+    ConsultaCNPJRequest,
     ConsultaCPFRequest,
     ConsultaEmailRequest,
+    ConsultaEnderecoRequest,
+    ConsultaFotoRequest,
     ConsultaGenericaRequest,
     ConsultaIPRequest,
+    ConsultaMaeRequest,
     ConsultaNomeRequest,
     ConsultaPIXRequest,
     ConsultaTelefoneRequest,
@@ -19,15 +24,10 @@ from app.models.requests import (
 )
 from app.models.responses import ConsultaResponse, ErrorResponse
 from app.services.account_pool import AccountPool
+from app.services.adapters import AllBotsFailedError, BotResponseError
+from app.services.bot_router import BotRouter
 from app.services.cache import ResultCache
 from app.services.runtime_state import RuntimeState
-from app.services.scraper import scrape_result
-from app.services.telegram_worker import (
-    BotResponseError,
-    build_command,
-    execute_query,
-    resolve_base_button_text,
-)
 from app.utils.logger import get_logger
 
 
@@ -41,9 +41,26 @@ COMMON_ERROR_RESPONSES = {
     422: {"model": ErrorResponse, "description": "Entrada inválida ou base incompatível com o tipo informado."},
     429: {"model": ErrorResponse, "description": "Rate limit da API excedido para o IP do cliente."},
     500: {"model": ErrorResponse, "description": "Erro interno inesperado durante o processamento."},
-    503: {"model": ErrorResponse, "description": "Módulo em manutenção ou indisponível no bot."},
+    503: {"model": ErrorResponse, "description": "Todos os bots disponíveis falharam ou o módulo está indisponível."},
     504: {"model": ErrorResponse, "description": "Timeout ao consultar o bot em todas as contas disponíveis."},
 }
+
+
+def _build_cache_command(tipo: ConsultationType, query_input: str) -> str:
+    return f"/{tipo} {query_input}".strip()
+
+
+def _build_success_payload(adapter_result: dict[str, Any]) -> dict[str, Any]:
+    payload_data = adapter_result.get("data", {})
+    if not isinstance(payload_data, dict):
+        payload_data = {"raw": payload_data}
+
+    link = adapter_result.get("link") or ""
+    return {
+        "status": "success",
+        "link": str(link),
+        "data": payload_data,
+    }
 
 
 async def _execute_consulta(
@@ -51,12 +68,12 @@ async def _execute_consulta(
     pool: AccountPool,
     cache: ResultCache,
     runtime_state: RuntimeState,
+    bot_router: BotRouter,
     tipo: ConsultationType,
     query_input: str,
     base: str | None = None,
 ) -> dict[str, Any]:
-    command = build_command(tipo, query_input)
-    base_button_text = resolve_base_button_text(tipo, base)
+    command = _build_cache_command(tipo, query_input)
     await runtime_state.start_query()
 
     try:
@@ -85,13 +102,8 @@ async def _execute_consulta(
             attempt_started_at = time.monotonic()
 
             try:
-                result_url = await execute_query(client, command, base_button_text)
-                data = await scrape_result(result_url)
-                payload = {
-                    "status": "success",
-                    "link": result_url,
-                    "data": data,
-                }
+                adapter_result = await bot_router.route_query(client, tipo, query_input, base)
+                payload = _build_success_payload(adapter_result)
                 cache.set(command, base, payload)
                 response.headers["X-Cache"] = "MISS"
 
@@ -103,6 +115,7 @@ async def _execute_consulta(
                         "input": query_input,
                         "base": base,
                         "account": label,
+                        "adapter": adapter_result.get("adapter"),
                         "attempt": attempt,
                         "retry_used": attempt > 1,
                         "timeout_failures": timeout_failures,
@@ -111,53 +124,119 @@ async def _execute_consulta(
                     },
                 )
                 return payload
-            except TimeoutError as exc:
-                tried_labels.add(label)
-                timeout_failures.append(
-                    {
-                        "account": label,
-                        "message": str(exc),
-                        "duration_ms": round((time.monotonic() - attempt_started_at) * 1000, 2),
-                    }
-                )
-                logger.warning(
-                    "Timeout ao consultar bot.",
-                    extra={
-                        "event": "consulta_timeout",
-                        "tipo": tipo,
-                        "input": query_input,
-                        "base": base,
-                        "account": label,
-                        "attempt": attempt,
-                        "duration_ms": round((time.monotonic() - attempt_started_at) * 1000, 2),
-                    },
-                )
-            except BotResponseError as exc:
+            except AllBotsFailedError as exc:
+                preferred_exception = exc.preferred_exception
+
+                if isinstance(preferred_exception, TimeoutError):
+                    tried_labels.add(label)
+                    timeout_failures.append(
+                        {
+                            "account": label,
+                            "message": str(preferred_exception),
+                            "duration_ms": round((time.monotonic() - attempt_started_at) * 1000, 2),
+                            "bot_failures": exc.failures,
+                        }
+                    )
+                    logger.warning(
+                        "Timeout ao consultar chain de bots.",
+                        extra={
+                            "event": "consulta_timeout",
+                            "tipo": tipo,
+                            "input": query_input,
+                            "base": base,
+                            "account": label,
+                            "attempt": attempt,
+                            "failures": exc.failures,
+                            "duration_ms": round((time.monotonic() - attempt_started_at) * 1000, 2),
+                        },
+                    )
+                    continue
+
+                if isinstance(preferred_exception, BotResponseError):
+                    await runtime_state.record_error(
+                        preferred_exception.error_code,
+                        str(preferred_exception),
+                        tipo=tipo,
+                        input=query_input,
+                        base=base,
+                        account=label,
+                        attempt=attempt,
+                        failures=exc.failures,
+                    )
+                    logger.warning(
+                        "Todos os bots do chain falharam com erro de negócio.",
+                        extra={
+                            "event": "bot_chain_error",
+                            "tipo": tipo,
+                            "input": query_input,
+                            "base": base,
+                            "account": label,
+                            "error_code": preferred_exception.error_code,
+                            "status_code": preferred_exception.status_code,
+                            "failures": exc.failures,
+                            "duration_ms": round((time.monotonic() - attempt_started_at) * 1000, 2),
+                        },
+                    )
+                    raise HTTPException(
+                        status_code=preferred_exception.status_code,
+                        detail=str(preferred_exception),
+                        headers={"X-Cache": "MISS"},
+                    ) from preferred_exception
+
+                if isinstance(preferred_exception, ValueError):
+                    await runtime_state.record_error(
+                        "validation",
+                        str(preferred_exception),
+                        tipo=tipo,
+                        input=query_input,
+                        base=base,
+                        account=label,
+                        attempt=attempt,
+                        failures=exc.failures,
+                    )
+                    logger.warning(
+                        "Todos os bots do chain falharam por validação.",
+                        extra={
+                            "event": "consulta_validation_error",
+                            "tipo": tipo,
+                            "input": query_input,
+                            "base": base,
+                            "account": label,
+                            "failures": exc.failures,
+                            "duration_ms": round((time.monotonic() - attempt_started_at) * 1000, 2),
+                        },
+                    )
+                    raise HTTPException(
+                        status_code=422,
+                        detail=str(preferred_exception),
+                        headers={"X-Cache": "MISS"},
+                    ) from preferred_exception
+
                 await runtime_state.record_error(
-                    exc.error_code,
+                    "bots_failed",
                     str(exc),
                     tipo=tipo,
                     input=query_input,
                     base=base,
                     account=label,
                     attempt=attempt,
+                    failures=exc.failures,
                 )
-                logger.warning(
-                    "Bot retornou erro de negócio.",
+                logger.error(
+                    "Nenhum bot do chain conseguiu atender a consulta.",
                     extra={
-                        "event": "bot_error",
+                        "event": "consulta_all_bots_failed",
                         "tipo": tipo,
                         "input": query_input,
                         "base": base,
                         "account": label,
-                        "error_code": exc.error_code,
-                        "status_code": exc.status_code,
+                        "failures": exc.failures,
                         "duration_ms": round((time.monotonic() - attempt_started_at) * 1000, 2),
                     },
                 )
                 raise HTTPException(
-                    status_code=exc.status_code,
-                    detail=str(exc),
+                    status_code=503,
+                    detail="Nenhum bot disponível conseguiu responder à consulta.",
                     headers={"X-Cache": "MISS"},
                 ) from exc
             except ValueError as exc:
@@ -278,6 +357,36 @@ def _build_generic_execution_args(
             )
             return payload.tipo, specific.query_input, specific.base
 
+        if payload.tipo == "cnpj":
+            if payload.base is not None:
+                raise ValueError("Tipo de consulta 'cnpj' não aceita base.")
+            specific = ConsultaCNPJRequest.model_validate({"cnpj": payload.input})
+            return payload.tipo, specific.query_input, None
+
+        if payload.tipo == "bin":
+            if payload.base is not None:
+                raise ValueError("Tipo de consulta 'bin' não aceita base.")
+            specific = ConsultaBINRequest.model_validate({"bin": payload.input})
+            return payload.tipo, specific.query_input, None
+
+        if payload.tipo == "endereco":
+            if payload.base is not None:
+                raise ValueError("Tipo de consulta 'endereco' não aceita base.")
+            specific = ConsultaEnderecoRequest.model_validate({"cpf": payload.input})
+            return payload.tipo, specific.query_input, None
+
+        if payload.tipo == "mae":
+            if payload.base is not None:
+                raise ValueError("Tipo de consulta 'mae' não aceita base.")
+            specific = ConsultaMaeRequest.model_validate({"nome": payload.input})
+            return payload.tipo, specific.query_input, None
+
+        if payload.tipo == "foto":
+            if payload.base is not None:
+                raise ValueError("Tipo de consulta 'foto' não aceita base.")
+            specific = ConsultaFotoRequest.model_validate({"cpf": payload.input})
+            return payload.tipo, specific.query_input, None
+
         if payload.tipo == "ip":
             if payload.base is not None:
                 raise ValueError("Tipo de consulta 'ip' não aceita base.")
@@ -314,7 +423,7 @@ def _build_generic_execution_args(
     "/cpf",
     response_model=ConsultaResponse,
     summary="Consultar CPF",
-    description="Executa a consulta de CPF no bot Black Consultas usando uma das sub-bases gratuitas disponíveis.",
+    description="Executa a consulta de CPF usando fallback automático entre os bots suportados para esse tipo.",
     responses=COMMON_ERROR_RESPONSES,
 )
 async def consulta_cpf(
@@ -323,15 +432,25 @@ async def consulta_cpf(
     pool: AccountPool = Depends(get_pool),
     cache: ResultCache = Depends(get_cache),
     runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
 ):
-    return await _execute_consulta(response=response, cache=cache, pool=pool, runtime_state=runtime_state, tipo="cpf", query_input=payload.query_input, base=payload.base)
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo="cpf",
+        query_input=payload.query_input,
+        base=payload.base,
+    )
 
 
 @router.post(
     "/nome",
     response_model=ConsultaResponse,
     summary="Consultar nome completo",
-    description="Envia um nome completo ao bot e seleciona a base NOME ou NOME DA MÃE para obter o resultado.",
+    description="Consulta um nome completo usando fallback entre bots compatíveis.",
     responses=COMMON_ERROR_RESPONSES,
 )
 async def consulta_nome(
@@ -340,15 +459,25 @@ async def consulta_nome(
     pool: AccountPool = Depends(get_pool),
     cache: ResultCache = Depends(get_cache),
     runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
 ):
-    return await _execute_consulta(response=response, cache=cache, pool=pool, runtime_state=runtime_state, tipo="nome", query_input=payload.query_input, base=payload.base)
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo="nome",
+        query_input=payload.query_input,
+        base=payload.base,
+    )
 
 
 @router.post(
     "/telefone",
     response_model=ConsultaResponse,
     summary="Consultar telefone",
-    description="Consulta um telefone com DDD na base TELEFONE do bot e retorna os dados estruturados em JSON.",
+    description="Consulta um telefone com DDD usando fallback entre os bots suportados.",
     responses=COMMON_ERROR_RESPONSES,
 )
 async def consulta_telefone(
@@ -357,15 +486,25 @@ async def consulta_telefone(
     pool: AccountPool = Depends(get_pool),
     cache: ResultCache = Depends(get_cache),
     runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
 ):
-    return await _execute_consulta(response=response, cache=cache, pool=pool, runtime_state=runtime_state, tipo="telefone", query_input=payload.query_input, base=payload.base)
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo="telefone",
+        query_input=payload.query_input,
+        base=payload.base,
+    )
 
 
 @router.post(
     "/cep",
     response_model=ConsultaResponse,
     summary="Consultar CEP",
-    description="Consulta um CEP diretamente no bot. O link de resultado é retornado sem exigir clique em botão de sub-base.",
+    description="Consulta um CEP com fallback entre adapters compatíveis.",
     responses=COMMON_ERROR_RESPONSES,
 )
 async def consulta_cep(
@@ -374,15 +513,24 @@ async def consulta_cep(
     pool: AccountPool = Depends(get_pool),
     cache: ResultCache = Depends(get_cache),
     runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
 ):
-    return await _execute_consulta(response=response, cache=cache, pool=pool, runtime_state=runtime_state, tipo="cep", query_input=payload.query_input)
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo="cep",
+        query_input=payload.query_input,
+    )
 
 
 @router.post(
     "/email",
     response_model=ConsultaResponse,
     summary="Consultar e-mail",
-    description="Consulta um endereço de e-mail na base EMAIL do bot e retorna o resultado parseado.",
+    description="Consulta um endereço de e-mail usando fallback entre os bots suportados.",
     responses=COMMON_ERROR_RESPONSES,
 )
 async def consulta_email(
@@ -391,15 +539,155 @@ async def consulta_email(
     pool: AccountPool = Depends(get_pool),
     cache: ResultCache = Depends(get_cache),
     runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
 ):
-    return await _execute_consulta(response=response, cache=cache, pool=pool, runtime_state=runtime_state, tipo="email", query_input=payload.query_input, base=payload.base)
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo="email",
+        query_input=payload.query_input,
+        base=payload.base,
+    )
+
+
+@router.post(
+    "/cnpj",
+    response_model=ConsultaResponse,
+    summary="Consultar CNPJ",
+    description="Consulta CNPJ usando o DataFlow nesta primeira fase da arquitetura multi-bot.",
+    responses=COMMON_ERROR_RESPONSES,
+)
+async def consulta_cnpj(
+    response: Response,
+    payload: ConsultaCNPJRequest,
+    pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
+    runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
+):
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo="cnpj",
+        query_input=payload.query_input,
+    )
+
+
+@router.post(
+    "/bin",
+    response_model=ConsultaResponse,
+    summary="Consultar BIN",
+    description="Consulta BIN diretamente pelo DataFlow.",
+    responses=COMMON_ERROR_RESPONSES,
+)
+async def consulta_bin(
+    response: Response,
+    payload: ConsultaBINRequest,
+    pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
+    runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
+):
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo="bin",
+        query_input=payload.query_input,
+    )
+
+
+@router.post(
+    "/endereco",
+    response_model=ConsultaResponse,
+    summary="Consultar endereço",
+    description="Consulta endereço via DataFlow usando CPF como input nesta fase inicial.",
+    responses=COMMON_ERROR_RESPONSES,
+)
+async def consulta_endereco(
+    response: Response,
+    payload: ConsultaEnderecoRequest,
+    pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
+    runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
+):
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo="endereco",
+        query_input=payload.query_input,
+    )
+
+
+@router.post(
+    "/mae",
+    response_model=ConsultaResponse,
+    summary="Consultar nome da mãe",
+    description="Consulta nome da mãe usando o DataFlow nesta fase.",
+    responses=COMMON_ERROR_RESPONSES,
+)
+async def consulta_mae(
+    response: Response,
+    payload: ConsultaMaeRequest,
+    pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
+    runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
+):
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo="mae",
+        query_input=payload.query_input,
+    )
+
+
+@router.post(
+    "/foto",
+    response_model=ConsultaResponse,
+    summary="Consultar foto",
+    description="Consulta foto pelo DataFlow. Quando o bot retornar mídia diretamente, o payload indicará isso em `data`.",
+    responses=COMMON_ERROR_RESPONSES,
+)
+async def consulta_foto(
+    response: Response,
+    payload: ConsultaFotoRequest,
+    pool: AccountPool = Depends(get_pool),
+    cache: ResultCache = Depends(get_cache),
+    runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
+):
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo="foto",
+        query_input=payload.query_input,
+    )
 
 
 @router.post(
     "/ip",
     response_model=ConsultaResponse,
     summary="Consultar IP",
-    description="Consulta um endereço IPv4 diretamente no bot e devolve os dados estruturados do resultado.",
+    description="Consulta um endereço IPv4. Nesta fase, o fallback usa apenas o adapter do Black Consultas.",
     responses=COMMON_ERROR_RESPONSES,
 )
 async def consulta_ip(
@@ -408,15 +696,24 @@ async def consulta_ip(
     pool: AccountPool = Depends(get_pool),
     cache: ResultCache = Depends(get_cache),
     runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
 ):
-    return await _execute_consulta(response=response, cache=cache, pool=pool, runtime_state=runtime_state, tipo="ip", query_input=payload.query_input)
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo="ip",
+        query_input=payload.query_input,
+    )
 
 
 @router.post(
     "/titulo",
     response_model=ConsultaResponse,
     summary="Consultar título de eleitor",
-    description="Consulta um título de eleitor no bot e seleciona a base TÍTULO DE ELEITOR.",
+    description="Consulta um título de eleitor com fallback automático entre os bots compatíveis.",
     responses=COMMON_ERROR_RESPONSES,
 )
 async def consulta_titulo(
@@ -425,15 +722,25 @@ async def consulta_titulo(
     pool: AccountPool = Depends(get_pool),
     cache: ResultCache = Depends(get_cache),
     runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
 ):
-    return await _execute_consulta(response=response, cache=cache, pool=pool, runtime_state=runtime_state, tipo="titulo", query_input=payload.query_input, base="titulo")
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo="titulo",
+        query_input=payload.query_input,
+        base="titulo",
+    )
 
 
 @router.post(
     "/pix",
     response_model=ConsultaResponse,
     summary="Consultar PIX",
-    description="Consulta PIX usando o formato nome completo|meio_cpf e seleciona a base PIX por padrão.",
+    description="Consulta PIX usando o Black Consultas nesta fase da arquitetura multi-bot.",
     responses=COMMON_ERROR_RESPONSES,
 )
 async def consulta_pix(
@@ -442,15 +749,25 @@ async def consulta_pix(
     pool: AccountPool = Depends(get_pool),
     cache: ResultCache = Depends(get_cache),
     runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
 ):
-    return await _execute_consulta(response=response, cache=cache, pool=pool, runtime_state=runtime_state, tipo="pix", query_input=payload.query_input, base="pix")
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo="pix",
+        query_input=payload.query_input,
+        base="pix",
+    )
 
 
 @router.post(
     "",
     response_model=ConsultaResponse,
     summary="Consultar via endpoint genérico",
-    description="Recebe o tipo, o input e a base em um único payload e roteia internamente para o comando correto do bot.",
+    description="Recebe o tipo, o input e a base em um único payload e aplica o fallback configurado para o tipo solicitado.",
     responses=COMMON_ERROR_RESPONSES,
 )
 async def consulta_generica(
@@ -459,6 +776,16 @@ async def consulta_generica(
     pool: AccountPool = Depends(get_pool),
     cache: ResultCache = Depends(get_cache),
     runtime_state: RuntimeState = Depends(get_runtime_state),
+    bot_router: BotRouter = Depends(get_bot_router),
 ):
     tipo, query_input, base = _build_generic_execution_args(payload)
-    return await _execute_consulta(response=response, cache=cache, pool=pool, runtime_state=runtime_state, tipo=tipo, query_input=query_input, base=base)
+    return await _execute_consulta(
+        response=response,
+        cache=cache,
+        pool=pool,
+        runtime_state=runtime_state,
+        bot_router=bot_router,
+        tipo=tipo,
+        query_input=query_input,
+        base=base,
+    )

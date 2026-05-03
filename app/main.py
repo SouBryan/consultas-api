@@ -11,6 +11,8 @@ from telethon.sessions import StringSession
 from app.config import settings
 from app.models.responses import HealthResponse, StatusResponse
 from app.services.account_pool import AccountPool
+from app.services.bot_health import BotHealth
+from app.services.bot_router import BotRouter
 from app.services.cache import ResultCache
 from app.services.rate_limiter import RateLimiter
 from app.services.request_rate_limiter import RequestRateLimiter
@@ -44,14 +46,24 @@ def get_runtime_state(request: Request) -> RuntimeState:
     return runtime_state
 
 
+def get_bot_router(request: Request) -> BotRouter:
+    bot_router = getattr(request.app.state, "bot_router", None)
+    if bot_router is None:
+        raise RuntimeError("BotRouter não foi inicializado.")
+    return bot_router
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     clients = await _connect_clients()
     rate_limiter = RateLimiter(settings.rate_limit_interval)
+    bot_health = BotHealth()
     app.state.pool = AccountPool(clients, rate_limiter=rate_limiter)
     app.state.cache = ResultCache(settings.cache_ttl_hours)
     app.state.request_rate_limiter = RequestRateLimiter(settings.max_requests_per_minute)
     app.state.runtime_state = RuntimeState()
+    app.state.bot_health = bot_health
+    app.state.bot_router = BotRouter(health_tracker=bot_health)
     app.state.clients = clients
     app.state.started_at = time.monotonic()
 
@@ -125,12 +137,12 @@ async def _connect_clients() -> dict[str, TelegramClient]:
 app = FastAPI(
     title="Consultas API",
     description=(
-        "API REST para automatizar consultas ao bot @BlackConsultaasBot via Telegram, "
-        "com balanceamento entre contas, cache, retry e documentação OpenAPI."
+        "API REST para automatizar consultas via múltiplos bots Telegram, "
+        "com balanceamento entre contas, cache, fallback e documentação OpenAPI."
     ),
-    version="0.4.0",
+    version="0.5.0",
     openapi_tags=[
-        {"name": "consultas", "description": "Endpoints de consulta aos módulos suportados do Black Consultas."},
+        {"name": "consultas", "description": "Endpoints de consulta com fallback automático entre bots suportados."},
         {"name": "system", "description": "Endpoints de saúde, status e monitoramento da API."},
     ],
     lifespan=lifespan,

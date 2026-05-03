@@ -17,7 +17,7 @@ class ErrorResponse(BaseModel):
 
 class ConsultaResponse(BaseModel):
     status: Literal["success"] = Field(description="Status fixo de sucesso da consulta.")
-    link: str = Field(description="Link público do resultado retornado pelo bot.")
+    link: str = Field(description="Link do resultado retornado pelo bot. Pode ser vazio quando o conteúdo é entregue diretamente no Telegram.")
     data: dict[str, Any] = Field(default_factory=dict, description="Dados estruturados extraídos do resultado.")
 
     model_config = ConfigDict(

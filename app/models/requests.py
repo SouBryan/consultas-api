@@ -11,6 +11,11 @@ ConsultationType = Literal[
     "telefone",
     "cep",
     "email",
+    "cnpj",
+    "bin",
+    "endereco",
+    "mae",
+    "foto",
     "ip",
     "titulo",
     "pix",
@@ -182,6 +187,93 @@ class ConsultaEmailRequest(BaseModel):
     @property
     def query_input(self) -> str:
         return self.email
+
+
+class ConsultaCNPJRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": {"cnpj": "33000167000101"}})
+
+    cnpj: str = Field(description="CNPJ com 14 dígitos.")
+
+    @field_validator("cnpj")
+    @classmethod
+    def validate_cnpj(cls, value: str) -> str:
+        digits_only = _normalize_digits(value)
+        if len(digits_only) != 14:
+            raise ValueError("CNPJ deve conter 14 dígitos.")
+        return digits_only
+
+    @property
+    def query_input(self) -> str:
+        return self.cnpj
+
+
+class ConsultaBINRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": {"bin": "516230"}})
+
+    bin: str = Field(description="BIN com 6 a 8 dígitos.")
+
+    @field_validator("bin")
+    @classmethod
+    def validate_bin(cls, value: str) -> str:
+        digits_only = _normalize_digits(value)
+        if len(digits_only) < 6 or len(digits_only) > 8:
+            raise ValueError("BIN deve conter entre 6 e 8 dígitos.")
+        return digits_only
+
+    @property
+    def query_input(self) -> str:
+        return self.bin
+
+
+class ConsultaEnderecoRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": {"cpf": "07068093868"}})
+
+    cpf: str = Field(description="CPF com 11 dígitos usado na consulta de endereço.")
+
+    @field_validator("cpf")
+    @classmethod
+    def validate_cpf(cls, value: str) -> str:
+        digits_only = _normalize_digits(value)
+        if len(digits_only) != 11:
+            raise ValueError("CPF deve conter 11 dígitos.")
+        return digits_only
+
+    @property
+    def query_input(self) -> str:
+        return self.cpf
+
+
+class ConsultaMaeRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": {"nome": "Maria Alves"}})
+
+    nome: str = Field(description="Nome completo da mãe a ser consultado.")
+
+    @field_validator("nome")
+    @classmethod
+    def validate_nome(cls, value: str) -> str:
+        return _validate_full_name(value)
+
+    @property
+    def query_input(self) -> str:
+        return self.nome
+
+
+class ConsultaFotoRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": {"cpf": "07068093868"}})
+
+    cpf: str = Field(description="CPF com 11 dígitos usado na consulta de foto.")
+
+    @field_validator("cpf")
+    @classmethod
+    def validate_cpf(cls, value: str) -> str:
+        digits_only = _normalize_digits(value)
+        if len(digits_only) != 11:
+            raise ValueError("CPF deve conter 11 dígitos.")
+        return digits_only
+
+    @property
+    def query_input(self) -> str:
+        return self.cpf
 
 
 class ConsultaIPRequest(BaseModel):
