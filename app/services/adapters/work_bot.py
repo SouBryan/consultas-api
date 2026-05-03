@@ -254,7 +254,9 @@ class WorkBotAdapter(BotAdapter):
 
         for attempt in range(1, 3):
             if current_message.media is None:
-                raise CaptchaError("Captcha recebido sem mídia para download.")
+                current_message = await self._wait_for_captcha_media(
+                    client, current_message, bot_entity_id,
+                )
 
             options = self._extract_button_options(current_message)
             if not options:
@@ -302,6 +304,63 @@ class WorkBotAdapter(BotAdapter):
             )
 
         raise CaptchaError("Captcha falhou após 2 tentativas no Work Bot.")
+
+    async def _wait_for_captcha_media(
+        self,
+        client: TelegramClient,
+        text_message: Message,
+        bot_entity_id: int | None,
+        timeout: float = 15.0,
+    ) -> Message:
+        """Espera o bot editar a mensagem de captcha para incluir a imagem,
+        ou enviar uma nova mensagem com mídia no grupo.
+
+        Também verifica mensagens recentes do grupo para evitar race condition
+        (a mensagem com imagem pode ter chegado antes do registro dos handlers).
+        """
+        # 1. Verificar se uma mensagem subsequente já tem a imagem do captcha
+        async for msg in client.iter_messages(self.group_id, limit=5, min_id=text_message.id):
+            if msg.id > text_message.id and msg.media is not None:
+                if bot_entity_id is None or msg.sender_id == bot_entity_id:
+                    return msg
+
+        # 2. Verificar se a própria mensagem já foi editada para incluir mídia
+        try:
+            refreshed = await client.get_messages(self.group_id, ids=text_message.id)
+            if refreshed and refreshed.media is not None:
+                return refreshed
+        except Exception:
+            pass
+
+        # 3. Registrar handlers e aguardar
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[Message] = loop.create_future()
+        edit_event = events.MessageEdited(chats=self.group_id)
+        new_event = events.NewMessage(chats=self.group_id)
+
+        async def on_edit(event: events.MessageEdited.Event) -> None:
+            msg = event.message
+            if msg.id != text_message.id:
+                return
+            if msg.media is not None and not future.done():
+                future.set_result(msg)
+
+        async def on_new(event: events.NewMessage.Event) -> None:
+            msg = event.message
+            if bot_entity_id is not None and msg.sender_id != bot_entity_id:
+                return
+            if msg.media is not None and not future.done():
+                future.set_result(msg)
+
+        client.add_event_handler(on_edit, edit_event)
+        client.add_event_handler(on_new, new_event)
+        try:
+            return await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            raise CaptchaError("Captcha recebido sem mídia para download.") from exc
+        finally:
+            client.remove_event_handler(on_edit, edit_event)
+            client.remove_event_handler(on_new, new_event)
 
     def _create_group_follow_up_waiter(
         self,
@@ -529,15 +588,24 @@ class WorkBotAdapter(BotAdapter):
         return bool(text.strip())
 
     def _is_captcha_challenge(self, message: Message) -> bool:
+        # Um captcha real sempre tem botões (opções de resposta)
+        if not message.buttons:
+            return False
+        if message.media is not None:
+            return True
         normalized = self._normalize_text(message.raw_text or "")
-        return message.media is not None or "captcha" in normalized
+        return "captcha" in normalized
 
     def _needs_private_start(self, text: str) -> bool:
         normalized = self._normalize_text(text)
         return any(marker in normalized for marker in self._START_PRIVATE_MARKERS)
 
     def _raise_if_bot_error(self, message: Message) -> None:
-        self._raise_common_bot_errors(message.raw_text or "")
+        text = message.raw_text or ""
+        normalized = self._normalize_text(text)
+        if "captcha pendente" in normalized:
+            raise CaptchaError("Bot possui captcha pendente de tentativa anterior.")
+        self._raise_common_bot_errors(text)
 
     def _parse_result_text(self, tipo: str, text: str) -> dict[str, Any]:
         parsed = self._parse_people_result(tipo, text)
