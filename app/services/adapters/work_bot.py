@@ -1,5 +1,6 @@
 import asyncio
 import re
+import time
 from typing import Any
 
 from telethon import TelegramClient, events
@@ -152,8 +153,17 @@ class WorkBotAdapter(BotAdapter):
         input_data: str,
     ) -> dict[str, Any]:
         command = f"/{tipo} {input_data}".strip()
-        sent_message = await client.send_message(self.group_id, command)
-        module_reply = await self.wait_for_bot_reply(client, sent_message, timeout=settings.telegram_timeout)
+
+        # Registra handler ANTES de enviar para evitar race condition
+        # (Work Bot pode responder em <1s e sem reply_to)
+        bot_entity_id = await self._resolve_bot_entity_id(client)
+        collected, close_collector = self._setup_group_collector(client, bot_entity_id)
+
+        try:
+            sent_message = await client.send_message(self.group_id, command)
+            module_reply = await self._await_group_reply(collected, sent_message, timeout=settings.telegram_timeout)
+        finally:
+            close_collector()
 
         if self._needs_private_start(module_reply.raw_text or ""):
             raise PrivateChatStartRequiredError(module_reply.raw_text or "")
@@ -197,6 +207,11 @@ class WorkBotAdapter(BotAdapter):
                 private_message = await asyncio.wait_for(private_future, timeout=settings.telegram_timeout)
             else:
                 private_message = private_future.result()
+
+            # Work Bot pode pedir para escolher formato (PDF/TXT) antes de enviar o resultado
+            private_message = await self._handle_format_selection(
+                client, private_entity, private_message
+            )
         except asyncio.TimeoutError as exc:
             raise TimeoutError(
                 f"{self.name} não entregou o resultado no privado dentro de {settings.telegram_timeout} segundos."
@@ -299,7 +314,7 @@ class WorkBotAdapter(BotAdapter):
                 return
 
             reply_to = self._extract_reply_to_msg_id(message)
-            if reply_to not in related_reply_ids:
+            if reply_to is not None and reply_to not in related_reply_ids:
                 return
 
             if not self._is_actionable_group_message(message):
@@ -372,6 +387,97 @@ class WorkBotAdapter(BotAdapter):
 
     async def _start_private_chat(self, client: TelegramClient, private_entity: Any) -> None:
         await client.send_message(private_entity, "/start")
+
+    async def _handle_format_selection(
+        self,
+        client: TelegramClient,
+        private_entity: Any,
+        message: Message,
+    ) -> Message:
+        """Se o bot pedir para escolher formato (PDF/TXT), clica em TXT e aguarda o resultado real."""
+        text_lower = (message.raw_text or "").lower()
+        if "formato do resultado" not in text_lower:
+            return message
+
+        # Clica no botão TXT para receber em texto
+        try:
+            await message.click(text="📝 TXT")
+        except Exception:
+            # Tenta pelo index caso texto não bata
+            await message.click(1)
+
+        # Aguarda a próxima mensagem privada (resultado real)
+        result_msg = None
+        deadline = time.monotonic() + settings.telegram_timeout
+        while time.monotonic() < deadline:
+            msgs = await client.get_messages(private_entity, min_id=message.id, limit=5)
+            for m in msgs:
+                if m.id > message.id and (m.raw_text or "").strip():
+                    result_msg = m
+                    break
+            if result_msg:
+                break
+            await asyncio.sleep(0.5)
+
+        if result_msg is None:
+            raise TimeoutError(
+                f"{self.name} não entregou o resultado após seleção de formato."
+            )
+        return result_msg
+
+    async def _resolve_bot_entity_id(self, client: TelegramClient) -> int | None:
+        try:
+            entity = await client.get_entity(self.bot_username)
+            return entity.id
+        except Exception:
+            return None
+
+    def _setup_group_collector(
+        self, client: TelegramClient, bot_entity_id: int | None
+    ) -> tuple[list[Message], Any]:
+        """Registra handlers para coletar mensagens do bot no grupo (NewMessage + Edited)."""
+        collected: list[Message] = []
+        new_event = events.NewMessage(chats=self.group_id)
+        edit_event = events.MessageEdited(chats=self.group_id)
+
+        async def handler(event) -> None:
+            message = event.message
+            is_from_bot = bot_entity_id and message.sender_id == bot_entity_id
+            if is_from_bot:
+                for i, existing in enumerate(collected):
+                    if existing.id == message.id:
+                        collected[i] = message
+                        return
+                collected.append(message)
+
+        client.add_event_handler(handler, new_event)
+        client.add_event_handler(handler, edit_event)
+
+        def close() -> None:
+            client.remove_event_handler(handler, new_event)
+            client.remove_event_handler(handler, edit_event)
+
+        return collected, close
+
+    async def _await_group_reply(
+        self,
+        collected: list[Message],
+        sent_msg: Message,
+        timeout: int = 15,
+    ) -> Message:
+        """Poll collected messages for a meaningful bot reply."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            for msg in collected:
+                if msg.id <= sent_msg.id:
+                    continue
+                text_lower = (msg.raw_text or "").lower()
+                if any(m in text_lower for m in self._TRANSIENT_MARKERS) and not msg.buttons:
+                    continue
+                return msg
+            await asyncio.sleep(0.3)
+
+        raise TimeoutError(f"{self.name} não respondeu dentro de {timeout} segundos.")
 
     def _ensure_button_exists(self, message: Message, button_text: str) -> None:
         target = self._normalize_text(button_text)
