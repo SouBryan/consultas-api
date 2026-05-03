@@ -1,5 +1,6 @@
 import asyncio
 import re
+import time
 from typing import Any
 
 from telethon import TelegramClient, events
@@ -37,6 +38,81 @@ class DataFlowAdapter(BotAdapter):
     def __init__(self):
         self.group_id = settings.group_dataflow
 
+    _TRANSIENT_MARKERS = {"processando", "aguarde"}
+
+    async def _setup_group_waiter(
+        self, client: TelegramClient
+    ) -> tuple[list[Message], Any]:
+        """Registra handler para coletar mensagens do bot no grupo.
+
+        Captura tanto mensagens novas quanto edições (bot edita "Processando..." → resultado).
+        """
+        collected: list[Message] = []
+        new_event = events.NewMessage(chats=self.group_id)
+        edit_event = events.MessageEdited(chats=self.group_id)
+
+        bot_entity_id: int | None = None
+        try:
+            entity = await client.get_entity(self.bot_username)
+            bot_entity_id = entity.id
+        except Exception:
+            pass
+
+        async def handler(event) -> None:
+            message = event.message
+            is_from_bot = bot_entity_id and message.sender_id == bot_entity_id
+            if is_from_bot:
+                # Para edits, atualiza a msg existente na lista
+                for i, existing in enumerate(collected):
+                    if existing.id == message.id:
+                        collected[i] = message
+                        return
+                collected.append(message)
+
+        client.add_event_handler(handler, new_event)
+        client.add_event_handler(handler, edit_event)
+
+        def close() -> None:
+            client.remove_event_handler(handler, new_event)
+            client.remove_event_handler(handler, edit_event)
+
+        return collected, close
+
+    async def _await_group_reply(
+        self,
+        collected: list[Message],
+        sent_msg: Message,
+        timeout: int = 15,
+    ) -> Message:
+        """Aguarda a resposta do bot verificando periodicamente as mensagens coletadas."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            for msg in collected:
+                if msg.id <= sent_msg.id:
+                    continue
+                # Ignorar mensagens transitórias (ex: "Processando...", "Consultando...")
+                text_lower = (msg.raw_text or "").lower()
+                if any(m in text_lower for m in self._TRANSIENT_MARKERS) and not msg.buttons:
+                    continue
+                # Qualquer msg definitiva do bot (com ou sem reply_to)
+                return msg
+            await asyncio.sleep(0.3)
+
+        raise TimeoutError(f"{self.name} não respondeu dentro de {timeout} segundos.")
+
+    async def wait_for_bot_reply(
+        self,
+        client: TelegramClient,
+        sent_msg: Message,
+        timeout: int = 15,
+    ) -> Message:
+        """Fallback — não usado diretamente no execute mas mantido por compatibilidade."""
+        collected, close = await self._setup_group_waiter(client)
+        try:
+            return await self._await_group_reply(collected, sent_msg, timeout=timeout)
+        finally:
+            close()
+
     def supports(self, tipo: str, base: str | None = None) -> bool:
         if tipo not in self.supported_commands:
             return False
@@ -65,8 +141,17 @@ class DataFlowAdapter(BotAdapter):
             raise ValueError(f"Adapter '{self.name}' não suporta '{tipo}' com base '{base}'.")
 
         command = f"/{tipo} {input_data}".strip()
-        sent_message = await client.send_message(self.group_id, command)
-        bot_reply = await self.wait_for_bot_reply(client, sent_message, timeout=settings.telegram_timeout)
+
+        # Registra handler ANTES de enviar para evitar race condition
+        bot_reply_future, close_reply = await self._setup_group_waiter(client)
+        try:
+            sent_message = await client.send_message(self.group_id, command)
+            bot_reply = await self._await_group_reply(
+                bot_reply_future, sent_message, timeout=settings.telegram_timeout
+            )
+        finally:
+            close_reply()
+
         self._raise_if_bot_error(bot_reply)
 
         if tipo in self.INLINE_GROUP_COMMANDS or not bot_reply.buttons:
@@ -82,10 +167,12 @@ class DataFlowAdapter(BotAdapter):
 
         try:
             await self._click_private_button(bot_reply)
-            private_message = await asyncio.wait_for(private_future, timeout=settings.telegram_timeout)
+            # DataFlow pode levar até 30s para consultar e enviar o resultado no privado
+            private_timeout = max(settings.telegram_timeout * 2, 30)
+            private_message = await asyncio.wait_for(private_future, timeout=private_timeout)
         except asyncio.TimeoutError as exc:
             raise TimeoutError(
-                f"{self.name} não entregou o resultado no privado dentro de {settings.telegram_timeout} segundos."
+                f"{self.name} não entregou o resultado no privado dentro de {private_timeout} segundos."
             ) from exc
         finally:
             close_private_waiter()
