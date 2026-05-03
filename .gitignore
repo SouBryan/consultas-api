@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 *.egg-info/
 __pycache__/
+DOCS_BLACK_CONSULTAS.md
+PLANO_IMPLEMENTACAO.md
