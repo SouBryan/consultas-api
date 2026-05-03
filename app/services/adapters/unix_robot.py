@@ -29,7 +29,7 @@ class UnixRobotAdapter(BotAdapter):
         "site",
     )
 
-    _TRANSIENT_MARKERS = {"processando", "aguarde", "consultando"}
+    _TRANSIENT_MARKERS = {"processando", "aguarde", "consultando", "buscando"}
     _START_PRIVATE_MARKERS = {
         "inicie primeiro no privado",
         "iniciar no privado",
@@ -160,7 +160,10 @@ class UnixRobotAdapter(BotAdapter):
 
         async def handler(event) -> None:
             message = event.message
-            if bot_entity_id is not None and message.sender_id != bot_entity_id:
+            # No grupo DON múltiplos bots respondem ao mesmo comando.
+            # O sender_id pode diferir do entity resolvido via username
+            # (canal bot vs bot direto). Filtramos pelo username no texto.
+            if not self._is_from_this_bot(message, bot_entity_id):
                 return
 
             for index, existing in enumerate(collected):
@@ -178,6 +181,13 @@ class UnixRobotAdapter(BotAdapter):
             client.remove_event_handler(handler, edit_event)
 
         return collected, close
+
+    def _is_from_this_bot(self, message: Message, bot_entity_id: int | None) -> bool:
+        """Verifica se a mensagem veio deste bot (por sender_id ou username no texto)."""
+        if bot_entity_id is not None and message.sender_id == bot_entity_id:
+            return True
+        text = (message.raw_text or "").lower()
+        return f"@{self.bot_username.lower()}" in text
 
     async def _await_group_reply(
         self,

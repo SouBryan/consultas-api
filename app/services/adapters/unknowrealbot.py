@@ -139,7 +139,7 @@ class UnknowrealbotAdapter(BotAdapter):
 
         async def handler(event) -> None:
             message = event.message
-            if bot_entity_id is not None and message.sender_id != bot_entity_id:
+            if not self._is_from_this_bot(message, bot_entity_id):
                 return
 
             for index, existing in enumerate(collected):
@@ -157,6 +157,12 @@ class UnknowrealbotAdapter(BotAdapter):
             client.remove_event_handler(handler, edit_event)
 
         return collected, close
+
+    def _is_from_this_bot(self, message: Message, bot_entity_id: int | None) -> bool:
+        if bot_entity_id is not None and message.sender_id == bot_entity_id:
+            return True
+        text = (message.raw_text or "").lower()
+        return f"@{self.bot_username.lower()}" in text
 
     async def _await_group_reply(
         self,

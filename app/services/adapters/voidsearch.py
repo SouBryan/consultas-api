@@ -25,7 +25,7 @@ class VoidSearchAdapter(BotAdapter):
         "ddd",
     )
 
-    _TRANSIENT_MARKERS = {"processando", "aguarde", "consultando"}
+    _TRANSIENT_MARKERS = {"processando", "aguarde", "consultando", "buscando"}
     _BASE_SELECTION_MARKERS = {"selecione uma base", "escolha uma base"}
 
     def __init__(self):
@@ -62,7 +62,7 @@ class VoidSearchAdapter(BotAdapter):
 
         try:
             sent_message = await client.send_message(self.group_id, command)
-            initial_reply = await self._await_group_reply(
+            initial_reply = await self._await_first_reply(
                 collected,
                 sent_message.id,
                 timeout=settings.telegram_timeout,
@@ -73,8 +73,9 @@ class VoidSearchAdapter(BotAdapter):
         self._raise_if_bot_error(initial_reply)
         result_message = initial_reply
 
-        if initial_reply.buttons:
-            selected_button = self._resolve_button_text(initial_reply, base)
+        needs_follow_up = initial_reply.buttons or self._is_transient_message(initial_reply)
+
+        if needs_follow_up:
             follow_up_future, close_waiter = self._create_follow_up_waiter(
                 client,
                 bot_entity_id,
@@ -82,7 +83,10 @@ class VoidSearchAdapter(BotAdapter):
                 editable_message_ids={initial_reply.id},
             )
             try:
-                await initial_reply.click(text=selected_button)
+                if initial_reply.buttons:
+                    selected_button = self._resolve_button_text(initial_reply, base)
+                    await initial_reply.click(text=selected_button)
+
                 result_message = await asyncio.wait_for(
                     follow_up_future,
                     timeout=settings.telegram_timeout,
@@ -119,7 +123,7 @@ class VoidSearchAdapter(BotAdapter):
 
         async def handler(event) -> None:
             message = event.message
-            if bot_entity_id is not None and message.sender_id != bot_entity_id:
+            if not self._is_from_this_bot(message, bot_entity_id):
                 return
 
             for index, existing in enumerate(collected):
@@ -137,6 +141,37 @@ class VoidSearchAdapter(BotAdapter):
             client.remove_event_handler(handler, edit_event)
 
         return collected, close
+
+    def _is_from_this_bot(self, message: Message, bot_entity_id: int | None) -> bool:
+        if bot_entity_id is not None and message.sender_id == bot_entity_id:
+            return True
+        text = (message.raw_text or "").lower()
+        return f"@{self.bot_username.lower()}" in text
+
+    async def _await_first_reply(
+        self,
+        collected: list[Message],
+        min_message_id: int,
+        timeout: int,
+    ) -> Message:
+        """Espera a primeira mensagem do bot (inclusive transientes como 'buscando...')."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            for message in collected:
+                if message.id <= min_message_id:
+                    continue
+                text = (message.raw_text or "").strip()
+                if text or message.media or message.buttons:
+                    return message
+            await asyncio.sleep(0.3)
+
+        raise TimeoutError(f"{self.name} não respondeu dentro de {timeout} segundos.")
+
+    def _is_transient_message(self, message: Message) -> bool:
+        """Verifica se a mensagem é transiente (processando/buscando)."""
+        text = (message.raw_text or "").strip()
+        normalized = self._normalize_text(text)
+        return any(marker in normalized for marker in self._TRANSIENT_MARKERS)
 
     async def _await_group_reply(
         self,
