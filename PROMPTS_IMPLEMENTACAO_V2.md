@@ -192,8 +192,17 @@ Work Bot (@WorkGrupoRBot):
 Captcha Solver (testado e funcionando):
 - API: VoidAI (compatível OpenAI) → https://api.voidai.app/v1
 - API Key: configurar como VOIDAI_API_KEY no .env
-- Modelo que funciona: gemini-2.0-flash (acertou 100% em testes, ~2.5s)
-- Modelos que NÃO funcionam: gemini-2.5-flash e gemini-2.5-pro (retornam content=null via VoidAI)
+- Modelos testados (TODOS acertam o captcha):
+  - gemini-2.0-flash: ~2.5s, sem reasoning, max_tokens=20 funciona ← RECOMENDADO
+  - gemini-3.1-flash-lite-preview: ~3.9s, usa reasoning, precisa max_tokens≥200
+  - gemini-2.5-flash: ~5.3s, usa reasoning, precisa max_tokens≥200
+  - gemini-2.5-pro: ~7.2s, usa reasoning, precisa max_tokens≥500
+  - gemini-3.1-pro-preview: ~8.7s, precisa max_tokens≥500
+- IMPORTANTE: Modelos "thinking" (2.5, 3.1) gastam ~95-477 tokens de reasoning antes do content.
+  Se max_tokens for muito baixo (ex: 20), content vem vazio! Usar max_tokens=500 para segurança.
+- Modelo que NÃO funciona: gemini-3-flash-preview (ERROR 403 / timeout)
+- Estratégia recomendada: usar gemini-2.0-flash com max_tokens=20 (mais rápido e barato).
+  Fallback: gemini-3.1-flash-lite-preview com max_tokens=500.
 - Payload de teste que funciona:
   ```json
   {
